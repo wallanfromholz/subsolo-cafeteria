@@ -305,6 +305,13 @@ html.mob .mesas{grid-template-columns:repeat(auto-fill,minmax(120px,1fr))}
 .prod-ings>span.f{background:var(--verm-bg);color:var(--verm);font-weight:600}
 .prod-empty{font-size:12px;color:var(--ink-3);text-align:center;padding:18px 8px;line-height:1.4}
 @media(max-width:820px){.prod-board{grid-template-columns:1fr}}
+.eq-row{display:flex;align-items:center;gap:11px;padding:10px 0;border-bottom:1px dashed var(--line);flex-wrap:wrap}
+.eq-row:last-child{border-bottom:0}
+.eq-row.off{opacity:.55}
+.eq-av{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--gold),var(--gold-2));color:var(--bordo-9);font-weight:800;font-size:17px;display:flex;align-items:center;justify-content:center;flex:none;font-family:var(--serif)}
+.perm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:6px;margin:7px 0 4px}
+.perm-chk{border:1.5px solid var(--line);border-radius:9px;padding:7px 10px;font-size:12.5px;text-align:left;color:var(--ink-2);background:var(--card)}
+.perm-chk.on{border-color:var(--gold-deep);background:var(--kraft);color:var(--bordo);font-weight:700}
 .mesa{
   border-radius:14px;border:1.5px solid var(--line);background:var(--card) var(--noise);
   padding:13px 14px;min-height:112px;display:flex;flex-direction:column;gap:3px;text-align:left;
@@ -565,7 +572,9 @@ body.locked #app,body.locked .bnav,body.locked .fab{display:none!important}
   <aside class="sidebar">
     <div class="side-logo" id="sideLogo"></div>
     <nav class="side-nav" id="sideNav"></nav>
-    <div class="side-foot"><button class="btn sm soft" data-act="sair" style="width:100%;margin-bottom:9px;justify-content:center">🔒 Sair</button>Sub Solo — Café Bristol<br>gestão artesanal, num só arquivo<br><span id="sideSalvo"></span></div>
+    <div class="side-foot"><div id="sideUser" style="margin-bottom:7px;font-weight:600"></div>
+      <div style="display:flex;gap:6px;margin-bottom:9px"><button class="btn sm soft" data-act="trocar-senha" style="flex:1;justify-content:center">🔑 Senha</button><button class="btn sm soft" data-act="sair" style="flex:1;justify-content:center">🔒 Sair</button></div>
+      Sub Solo — Café Bristol<br>gestão artesanal, num só arquivo<br><span id="sideSalvo"></span></div>
   </aside>
   <div class="main">
     <header class="topbar">
@@ -685,11 +694,16 @@ function estadoVazio(){
       simples:{anexo:'I',rbt12Modo:'auto',rbt12Manual:120000},
       fidelidade:{modo:'compras',metaCompras:10,metaValor:200,recompensa:'1 bebida grátis'},
       rfm:{riscoDias:30,inativoDias:60,vipCompras:6,vipValor:250},
+      permissoes:{
+        caixa:['dash','balcao','pedidos','producao','agenda','estoque','compras','caixa','clientes'],
+        garcom:['balcao','pedidos','agenda']
+      },
+      travarSempre:false,
       ultimoBackup:null
     },
     categorias:[],insumos:[],receitas:[],produtos:[],clientes:[],pedidos:[],
     tarefas:[],lotesProntos:[],compras:[],perdas:[],cardapios:[],despesas:[],
-    comandas:[], caixa:{dias:{}}, auth:null
+    comandas:[], caixa:{dias:{}}, usuarios:[], auth:null
   };
 }
 function migrar(st){
@@ -702,8 +716,18 @@ function migrar(st){
   st.config.simples=Object.assign({},base.config.simples,st.config.simples||{});
   st.config.fidelidade=Object.assign({},base.config.fidelidade,st.config.fidelidade||{});
   st.config.rfm=Object.assign({},base.config.rfm,st.config.rfm||{});
+  st.config.permissoes=Object.assign({},base.config.permissoes,st.config.permissoes||{});
   for(const k of Object.keys(base))if(st[k]===undefined)st[k]=base[k];
   if(!st.caixa||!st.caixa.dias)st.caixa={dias:{}};
+  if(!Array.isArray(st.usuarios))st.usuarios=[];
+  /* acesso único (v2) → equipe multi-usuário: o login antigo vira o administrador */
+  if(st.auth&&st.auth.hash&&!st.usuarios.length){
+    st.usuarios.push({id:'u_'+uid(),nome:st.auth.user,user:st.auth.user,email:'',papel:'admin',
+      salt:st.auth.salt,hash:st.auth.hash,recSalt:st.auth.recSalt,recHash:st.auth.recHash,
+      ativo:true,criadoEm:Date.now()});
+    if(st.auth.travarSempre)st.config.travarSempre=true;
+  }
+  st.auth=null;
   /* v1 → v2: preço único por SKU; taxas antigas → custos por canal */
   for(const p of (st.produtos||[])){
     if(p.preco==null)p.preco=arred(+(p.precos?.balcao??p.precos?.encomenda??0),2);
@@ -1417,19 +1441,78 @@ function exportarJSON(){
 }
 function importarJSON(obj){
   if(!obj||!obj.schemaVersion||!Array.isArray(obj.insumos)){toast('Arquivo inválido: não parece um backup do Subsolo Café.','warn');return;}
-  const authAntes=S&&S.auth;
-  S=migrar(obj);
-  if((!S.auth||!S.auth.hash)&&authAntes&&authAntes.hash)S.auth=authAntes; // não remove a trava ao importar backup antigo
-  gerarFixos();replanejar();persist();
-  go('dash');toast('<b>Dados importados.</b> Tudo substituído pelo backup.');
+  confirmar('Substituir TODOS os dados deste aparelho (inclusive equipe e acessos) pelo backup? Não dá para desfazer.',()=>{
+    const usersAntes=S&&Array.isArray(S.usuarios)&&S.usuarios.length?S.usuarios:null;
+    S=migrar(obj);
+    if(!S.usuarios.length&&usersAntes)S.usuarios=usersAntes; // não remove a trava ao importar backup sem equipe
+    // garante que sempre exista um administrador ativo (evita ficar trancado para sempre)
+    if(S.usuarios.length&&!S.usuarios.some(u=>u.papel==='admin'&&u.ativo!==false)){
+      const u=S.usuarios.find(x=>x.ativo!==false)||S.usuarios[0];
+      u.papel='admin';u.ativo=true;
+      toast(`⚠️ O backup não tinha administrador ativo — <b>${esc(u.nome)}</b> foi promovido(a) a administrador.`,'warn');
+    }
+    gerarFixos();replanejar();persist();
+    const eu=usuarioAtual();
+    if(!eu||eu.ativo===false){UID=null;limparSessao();closeAllModals();mostrarLogin();toast('<b>Dados importados.</b> Entre de novo com um acesso da equipe do backup.');return;}
+    go('dash');toast('<b>Dados importados.</b> Tudo substituído pelo backup.');
+  },'Substituir tudo');
 }
 function backupVelho(){ const u=S.config.ultimoBackup;
   return !u||((Date.now()-u)/864e5>7); }
 
+/* =================== USUÁRIOS & PERMISSÕES =================== */
+const PAPEIS={admin:'Administrador',caixa:'Caixa',garcom:'Garçom'};
+const PAPEL_BADGE={admin:'b-bordo',caixa:'b-gold',garcom:'b-cream'};
+/* rotas que aparecem nos checkboxes de permissão (config/equipe são sempre só do admin) */
+const ROTAS_PERM=[
+  ['dash','🏠 Início'],['balcao','🛎️ Balcão'],['pedidos','📋 Encomendas'],['producao','🔥 Produção'],
+  ['agenda','📅 Agenda'],['estoque','📦 Estoque'],['compras','🧺 Compras'],['caixa','🪙 Caixa do dia'],
+  ['relatorios','📈 Relatórios'],['clientes','👥 Clientes'],['catalogo','🏷️ Produtos'],['receitas','🧾 Receitas'],
+  ['cardapio','📜 Cardápio & Matriz'],['precificacao','💰 Precificação'],['insumos','🧂 Insumos']
+];
+let UID=null; // usuário logado nesta sessão
+const usuarioAtual=()=>S&&Array.isArray(S.usuarios)?S.usuarios.find(u=>u.id===UID)||null:null;
+const ehAdmin=()=>{const u=usuarioAtual();return !u||u.papel==='admin';};
+function podeVer(rota){
+  const u=usuarioAtual();
+  if(!u||u.papel==='admin')return true;
+  if(rota==='mais')return true;
+  if(rota==='config'||rota==='equipe')return false;
+  return (S.config.permissoes?.[u.papel]||[]).includes(rota);
+}
+function rotaInicial(){
+  for(const [r] of ROTAS_PERM)if(podeVer(r))return r;
+  return 'mais';
+}
+const adminsAtivos=()=>S.usuarios.filter(u=>u.papel==='admin'&&u.ativo!==false).length;
+// o login aceita usuário OU e-mail — então nenhum pode colidir com o de outra pessoa
+function loginColide(id,user,email){
+  const u=String(user||'').toLowerCase(), e=String(email||'').toLowerCase();
+  return S.usuarios.some(x=>{
+    if(x.id===id)return false;
+    const xu=String(x.user||'').toLowerCase(), xe=String(x.email||'').toLowerCase();
+    return xu===u||(e&&(xe===e||xu===e))||(xe&&xe===u);
+  });
+}
+function mascaraEmail(e){
+  const [l,d]=String(e||'').split('@'); if(!d)return e||'';
+  return (l.length<=2?l[0]||'':l.slice(0,2))+'•••@'+d;
+}
+async function apiReset(payload){
+  const r=await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  let j=null; try{j=await r.json();}catch(e){}
+  if(!j)throw new Error('O serviço de e-mail não respondeu (o app precisa estar publicado na Vercel).');
+  if(!j.ok)throw new Error(j.erro||'Falha no envio do e-mail.');
+  return j;
+}
+
 /* =================== UI · INFRA =================== */
 const R={route:'dash',params:{},tmp:{}};
 const PEND={};
-function go(route,params={}){R.route=route;R.params=params;render();window.scrollTo(0,0);}
+function go(route,params={}){
+  if(!podeVer(route)){toast('Seu acesso não inclui esta área.','warn');route=rotaInicial();params={};}
+  R.route=route;R.params=params;render();window.scrollTo(0,0);
+}
 function refresh(){render();}
 function commit(){replanejar();persist();}
 function commitR(){commit();render();}
@@ -1449,7 +1532,7 @@ const MENU=[
   ['CATÁLOGO',[
     ['catalogo','🏷️','Produtos'],['receitas','🧾','Receitas'],['cardapio','📜','Cardápio & Matriz'],
     ['precificacao','💰','Precificação'],['insumos','🧂','Insumos']]],
-  ['SISTEMA',[['config','⚙️','Configurações']]]
+  ['SISTEMA',[['equipe','🔐','Equipe & Acessos'],['config','⚙️','Configurações']]]
 ];
 function navBadge(r){
   if(r==='compras'){const n=S.compras.filter(c=>!c.comprado).length;return n?`<span class="bd">${n}</span>`:'';}
@@ -1460,21 +1543,29 @@ function navBadge(r){
 function montarSidebar(){
   const el=$('#sideNav'); if(!el)return;
   const atual=ROUTES[R.route]?.nav||R.route;
-  el.innerHTML=MENU.map(([grp,itens])=>
-    `<div class="nav-grp">${grp}</div>`+
-    itens.map(([r,ic,l])=>`<button class="nv ${atual===r?'on':''}" data-act="ir" data-route="${r}"><span class="ic">${ic}</span>${l}${navBadge(r)}</button>`).join('')
-  ).join('');
+  el.innerHTML=MENU.map(([grp,itens])=>{
+    const vis=itens.filter(([r])=>podeVer(r));
+    if(!vis.length)return '';
+    return `<div class="nav-grp">${grp}</div>`+
+      vis.map(([r,ic,l])=>`<button class="nv ${atual===r?'on':''}" data-act="ir" data-route="${r}"><span class="ic">${ic}</span>${l}${navBadge(r)}</button>`).join('');
+  }).join('');
   const lg=$('#sideLogo'); if(lg&&!lg.innerHTML)lg.innerHTML=BEAN('',44,60)+`<div style="text-align:center"><div class="lk-1">SUB SOLO</div><div class="lk-2">— CAFÉ BRISTOL —</div></div>`;
+  const su=$('#sideUser'); const u=usuarioAtual();
+  if(su)su.innerHTML=u?`👤 ${esc(u.nome)} · ${PAPEIS[u.papel]||esc(u.papel)}`:'';
 }
 function render(){
+  if(!podeVer(R.route)){R.route=rotaInicial();R.params={};}
   const def=ROUTES[R.route]||ROUTES.dash;
   $('#pageTitle').textContent=def.titulo(R.params);
   $('#view').innerHTML=def.html(R.params);
   const atual=def.nav||R.route;
-  $$('.bnav [data-nav]').forEach(b=>b.classList.toggle('on',b.dataset.nav===atual));
+  $$('.bnav [data-nav]').forEach(b=>{b.classList.toggle('on',b.dataset.nav===atual);
+    b.classList.toggle('hide',!podeVer(b.dataset.route));});
+  $$('.topbar .tb-btn[data-route]').forEach(b=>b.classList.toggle('hide',!podeVer(b.dataset.route)));
+  const fab=$('.fab'); if(fab)fab.classList.toggle('hide',!(podeVer('balcao')||podeVer('pedidos')));
   montarSidebar();
   applyUiModo();
-  $('#backupDot').classList.toggle('hide',!backupVelho());
+  $('#backupDot').classList.toggle('hide',!(ehAdmin()&&backupVelho()));
   $('#comprasDot').classList.toggle('hide',!S.compras.some(c=>!c.comprado));
   const cd=caixaDia(hISO()); $('#caixaDot').classList.toggle('hide',!(cd.abertura==null&&!cd.fechamento));
   const sf=$('#sideSalvo'); if(sf)sf.textContent=storageOK?'✓ salvo automaticamente':'⚠ salvando só em memória';
@@ -1620,29 +1711,36 @@ function statusCaixaHoje(){
 }
 function alertasOp(){
   const A=[];const H=hISO();
-  const venc=S.lotesProntos.filter(l=>l.qtd>0&&diffDias(l.validade,H)<=3);
-  for(const l of venc.slice(0,4)){const s=skuById(l.skuId);const d=diffDias(l.validade,H);
-    A.push({i:'⏳',cls:d<=1?'bad':'warn',m:`<b>${nf(l.qtd)}× ${esc(s?.nome)}</b> ${d<0?'venceu':d===0?'vence hoje':d===1?'vence amanhã':'vence em '+d+' dias'} (${fData(l.validade)})`,act:`data-act="ir" data-route="estoque"`});}
-  const baixos=S.insumos.filter(i=>i.estoque<i.min);
-  if(baixos.length)A.push({i:'📉',cls:'warn',m:`<b>${baixos.length} insumo(s)</b> abaixo do mínimo: ${baixos.slice(0,3).map(i=>esc(i.nome)).join(', ')}${baixos.length>3?'…':''}`,act:`data-act="ir" data-route="estoque"`});
-  const pend=S.compras.filter(c=>!c.comprado);
-  if(pend.length)A.push({i:'🧺',m:`<b>${pend.length} item(ns)</b> na lista de compras · ${m(aPagarResumo().compras)}`,act:`data-act="ir" data-route="compras"`});
-  const reativar=S.clientes.filter(c=>rfmStatus(c.id)==='Em risco');
-  if(reativar.length)A.push({i:'💌',m:`<b>${reativar.length} cliente(s) para reativar</b> — um "sentimos sua falta" resolve`,act:`data-act="ir" data-route="clientes" data-filtro="Em risco"`});
-  const nivers=S.clientes.map(c=>({c,d:aniversarioEmDias(c)})).filter(x=>x.d!==null&&x.d<=7);
-  for(const x of nivers)A.push({i:'🎂',m:`<b>${esc(x.c.nome)}</b> faz aniversário ${x.d===0?'hoje':x.d===1?'amanhã':'em '+x.d+' dias'}`,act:`data-act="abrir-cliente" data-id="${x.c.id}"`});
+  if(podeVer('estoque')){
+    const venc=S.lotesProntos.filter(l=>l.qtd>0&&diffDias(l.validade,H)<=3);
+    for(const l of venc.slice(0,4)){const s=skuById(l.skuId);const d=diffDias(l.validade,H);
+      A.push({i:'⏳',cls:d<=1?'bad':'warn',m:`<b>${nf(l.qtd)}× ${esc(s?.nome)}</b> ${d<0?'venceu':d===0?'vence hoje':d===1?'vence amanhã':'vence em '+d+' dias'} (${fData(l.validade)})`,act:`data-act="ir" data-route="estoque"`});}
+    const baixos=S.insumos.filter(i=>i.estoque<i.min);
+    if(baixos.length)A.push({i:'📉',cls:'warn',m:`<b>${baixos.length} insumo(s)</b> abaixo do mínimo: ${baixos.slice(0,3).map(i=>esc(i.nome)).join(', ')}${baixos.length>3?'…':''}`,act:`data-act="ir" data-route="estoque"`});
+  }
+  if(podeVer('compras')){
+    const pend=S.compras.filter(c=>!c.comprado);
+    if(pend.length)A.push({i:'🧺',m:`<b>${pend.length} item(ns)</b> na lista de compras · ${m(aPagarResumo().compras)}`,act:`data-act="ir" data-route="compras"`});
+  }
+  if(podeVer('clientes')){
+    const reativar=S.clientes.filter(c=>rfmStatus(c.id)==='Em risco');
+    if(reativar.length)A.push({i:'💌',m:`<b>${reativar.length} cliente(s) para reativar</b> — um "sentimos sua falta" resolve`,act:`data-act="ir" data-route="clientes" data-filtro="Em risco"`});
+    const nivers=S.clientes.map(c=>({c,d:aniversarioEmDias(c)})).filter(x=>x.d!==null&&x.d<=7);
+    for(const x of nivers)A.push({i:'🎂',m:`<b>${esc(x.c.nome)}</b> faz aniversário ${x.d===0?'hoje':x.d===1?'amanhã':'em '+x.d+' dias'}`,act:`data-act="abrir-cliente" data-id="${x.c.id}"`});
+  }
   return A;
 }
 ROUTES.dash={titulo:()=>'Início',html(){
-  const tab=R.tmp.dashTab||'op';
+  const adm=ehAdmin();
+  const tab=adm?(R.tmp.dashTab||'op'):'op';
   return `
   <div class="rowflex mb2">
-    <div class="seg gold" style="max-width:380px;flex:1">
+    ${adm?`<div class="seg gold" style="max-width:380px;flex:1">
       <button data-act="dash-tab" data-v="op" class="${tab==='op'?'on':''}">🧑‍🍳 Operacional</button>
       <button data-act="dash-tab" data-v="fin" class="${tab==='fin'?'on':''}">📊 Financeiro</button>
-    </div>
+    </div>`:''}
     <span class="sp"></span>
-    <button class="btn sm ghost" data-act="exportar">⬇️ Backup</button>
+    ${adm?`<button class="btn sm ghost" data-act="exportar">⬇️ Backup</button>`:''}
   </div>
   ${tab==='op'?dashOp():dashFin()}`;
 }};
@@ -1655,18 +1753,20 @@ function dashOp(){
   const als=alertasOp();
   const mesasAbertas=S.comandas.length, totMesas=S.comandas.reduce((a,c)=>a+totalComanda(c),0);
   const vendasHoje=pedidosEntregues().filter(p=>p.dataEntrega===H&&p.canal==='balcao').length;
-  return `
-  <div class="grid3">
+  const cards=[];
+  if(podeVer('producao'))cards.push(`
     <div class="card ${tarefas.length?'':'flat'}" style="margin:0;${tarefas.length?'border-color:var(--gold-deep)':''}">
       <h3>🧑‍🍳 Produzir ${tarefas.some(t=>t.data<H)?'<span class="badge b-red">atrasado</span>':'hoje'}<span class="sp"></span><span class="badge ${tarefas.length?'b-gold':'b-green'}">${tarefas.length?nf(tarefas.length)+' tarefa'+(tarefas.length>1?'s':''):'em dia'}</span></h3>
       ${tarefas.length?tarefas.slice(0,3).map(t=>tarefaLinha(t)).join(''):'<div class="small muted">Nada a produzir agora. Forno em paz. ☕</div>'}
       <div class="rowflex mt" style="gap:6px"><button class="btn sm gold" data-act="ir" data-route="producao">🔥 Abrir produção</button>${tarefas.length?`<button class="btn sm ghost" data-act="print-producao" data-data="${H}">🖨️ Imprimir</button>`:''}</div>
-    </div>
+    </div>`);
+  if(podeVer('pedidos'))cards.push(`
     <div class="card" style="margin:0">
       <h3>🛵 Entregas<span class="sp"></span><span class="badge ${entregas.length?'b-bordo':'b-cream'}">${nf(entregas.length)} até amanhã</span></h3>
       ${entregas.length?entregas.slice(0,3).map(p=>pedidoLinha(p)).join(''):'<div class="small muted">Sem entregas até amanhã.</div>'}
-      <button class="btn sm ghost mt" data-act="ir" data-route="agenda">Ver agenda completa →</button>
-    </div>
+      ${podeVer('agenda')?`<button class="btn sm ghost mt" data-act="ir" data-route="agenda">Ver agenda completa →</button>`:''}
+    </div>`);
+  if(podeVer('balcao'))cards.push(`
     <div class="card" style="margin:0">
       ${S.config.modoBalcao==='mesas'
         ?`<h3>🪑 Mesas<span class="sp"></span><span class="badge ${mesasAbertas?'b-gold':'b-cream'}">${nf(mesasAbertas)} aberta${mesasAbertas===1?'':'s'}</span></h3>
@@ -1676,16 +1776,17 @@ function dashOp(){
           <div class="k-v" style="font-size:26px">${nf(vendasHoje)}</div>
           <div class="small muted mb">venda${vendasHoje===1?'':'s'} registrada${vendasHoje===1?'':'s'} hoje</div>`}
       <button class="btn gold block" data-act="ir" data-route="balcao">Abrir balcão</button>
-    </div>
-  </div>
-  <button class="al ${stCx==='aberto'?'good':stCx==='fechado'?'':'warn'} mt" data-act="ir" data-route="caixa" style="margin-top:14px">
+    </div>`);
+  return `
+  ${cards.length?`<div class="grid3">${cards.join('')}</div>`:''}
+  ${podeVer('caixa')?`<button class="al ${stCx==='aberto'?'good':stCx==='fechado'?'':'warn'} mt" data-act="ir" data-route="caixa" style="margin-top:14px">
     <span class="a-i">🪙</span>
     <span class="a-m">${stCx==='aberto'
       ?`<b>Caixa aberto.</b> Entradas de hoje: <b class="money">${m(ent.total)}</b> (Pix ${m(ent.porForma.pix||0)} · Cartão ${m(ent.porForma.cartao||0)} · Dinheiro ${m(ent.porForma.dinheiro||0)})`
       :stCx==='fechado'?`<b>Caixa de hoje fechado.</b> Total do dia: <b class="money">${m(ent.total)}</b>`
       :`<b>Caixa ainda não foi aberto hoje.</b> Abra com o troco inicial para acompanhar a gaveta.`}</span><span>›</span>
-  </button>
-  ${exc.length?`<div class="card" style="border-color:var(--gold-deep)">
+  </button>`:''}
+  ${exc.length&&podeVer('balcao')?`<div class="card" style="border-color:var(--gold-deep)">
     <h3>✨ Oportunidades de venda <span class="small muted" style="font-weight:400">— produzido além dos pedidos</span></h3>
     ${exc.map(e=>`
       <div style="padding:9px 0;border-bottom:1px dashed var(--line)">
@@ -1696,7 +1797,7 @@ function dashOp(){
       </div>`).join('')}
   </div>`:''}
   ${als.length?`<div class="card"><h3>Alertas</h3>${als.map(a=>`<button class="al ${a.cls||''}" ${a.act||''}><span class="a-i">${a.i}</span><span class="a-m">${a.m}</span><span>›</span></button>`).join('')}</div>`:''}
-  ${backupVelho()?`<button class="al warn" data-act="exportar"><span class="a-i">🛟</span><span class="a-m">Seu último backup tem mais de 7 dias (ou nunca foi feito). Exporte e envie para o outro aparelho.</span><span>›</span></button>`:''}`;
+  ${ehAdmin()&&backupVelho()?`<button class="al warn" data-act="exportar"><span class="a-i">🛟</span><span class="a-m">Seu último backup tem mais de 7 dias (ou nunca foi feito). Exporte e envie para o outro aparelho.</span><span>›</span></button>`:''}`;
 }
 function dashFin(){
   const mes=hISO().slice(0,7);
@@ -2281,7 +2382,7 @@ ROUTES.agenda={titulo:()=>'Agenda de entregas',html(){
       </div>
     </div>
     <div class="card" style="margin:0"><h3>${nomeDia(sel)} — ${fDataC(sel)}<span class="sp"></span>
-      <button class="btn sm ghost" data-act="print-producao" data-data="${sel}">🖨️ Produção</button></h3>
+      ${podeVer('producao')?`<button class="btn sm ghost" data-act="print-producao" data-data="${sel}">🖨️ Produção</button>`:''}</h3>
       <div class="label">Entregas</div>
       ${e.length?e.sort((a,b)=>(a.hora||'')<(b.hora||'')?-1:1).map(p=>pedidoLinha(p)).join(''):'<div class="muted small mb">Sem entregas neste dia.</div>'}
       <div class="label mt">Produção & tarefas</div>
@@ -3076,7 +3177,7 @@ ROUTES.config={titulo:()=>'Configurações',html(){
     <div class="card"><h3>🛟 Backup e sincronização</h3>
       <div class="small muted mb">Um arquivo é tudo. Exporte e envie para o outro aparelho para manter os dois em dia. ${storageOK?'':'<b>⚠ Este navegador não está salvando sozinho — exporte com frequência.</b>'}</div>
       <div class="rowflex"><button class="btn gold" data-act="exportar">⬇️ Exportar backup</button>
-      <label class="btn soft" style="cursor:pointer">⬆️ Importar backup<input type="file" accept="application/json,.json" style="display:none" data-inp="importar-arquivo"></label></div>
+      <label class="btn soft" style="cursor:pointer">⬆️ Importar backup<input type="file" accept="application/json,.json" style="display:none" data-chg="importar-arquivo"></label></div>
       <div class="tiny muted mt">Último backup: ${c.ultimoBackup?fData(dISO(new Date(c.ultimoBackup)))+' às '+new Date(c.ultimoBackup).toTimeString().slice(0,5):'nunca'}</div>
     </div>
     <div class="card"><h3>🛎️ Balcão</h3>
@@ -3148,14 +3249,15 @@ ROUTES.config={titulo:()=>'Configurações',html(){
   </div>
   <div class="rowflex mb2"><button class="btn primary lg" data-act="salvar-config">Salvar configurações</button></div>
   <div class="card"><h3>🔒 Acesso e segurança</h3>
-    <div class="rowflex mb"><span class="small muted">Login atual:</span> <b>${esc(S.auth?.user||'—')}</b></div>
+    <div class="rowflex mb"><span class="small muted">Conectado como:</span> <b>${esc(usuarioAtual()?.nome||'—')}</b> <span class="badge ${PAPEL_BADGE[usuarioAtual()?.papel]||'b-cream'}">${PAPEIS[usuarioAtual()?.papel]||''}</span></div>
     ${campo('Ao abrir o sistema neste aparelho',`<div class="seg">
-      <button data-act="auth-travar" data-v="nao" class="${!S.auth?.travarSempre?'on':''}">Manter conectado</button>
-      <button data-act="auth-travar" data-v="sim" class="${S.auth?.travarSempre?'on':''}">Pedir senha toda vez</button></div>`)}
-    <div class="rowflex"><button class="btn soft" data-act="trocar-senha">Trocar senha</button>
-      <button class="btn soft" data-act="trocar-usuario">Trocar usuário</button>
+      <button data-act="auth-travar" data-v="nao" class="${!S.config.travarSempre?'on':''}">Manter conectado</button>
+      <button data-act="auth-travar" data-v="sim" class="${S.config.travarSempre?'on':''}">Pedir senha toda vez</button></div>`)}
+    <div class="rowflex"><button class="btn soft" data-act="trocar-senha">Trocar minha senha</button>
+      <button class="btn soft" data-act="trocar-usuario">Trocar meu usuário</button>
+      <button class="btn gold" data-act="ir" data-route="equipe">🔐 Gerenciar equipe →</button>
       <button class="btn danger" data-act="sair">🔒 Sair do sistema</button></div>
-    <div class="tiny muted mt">A senha fica guardada só neste aparelho, de forma cifrada. Ela também vai junto no backup — guarde seu código de recuperação em lugar seguro.</div>
+    <div class="tiny muted mt">As senhas ficam guardadas de forma cifrada neste aparelho e vão junto no backup. Cada pessoa tem seu código de recuperação — guarde em lugar seguro.</div>
   </div>
   <div class="card" style="border-color:#E3C0B8">
     <h3 style="color:var(--verm)">⚠️ Zona de risco</h3>
@@ -3164,6 +3266,76 @@ ROUTES.config={titulo:()=>'Configurações',html(){
     <div class="tiny muted mt">"Apagar exemplo" remove só os dados de demonstração. "Apagar tudo" limpa o app inteiro.</div>
   </div>`;
 }};
+/* =================== EQUIPE & ACESSOS (admin) =================== */
+ROUTES.equipe={titulo:()=>'Equipe & Acessos',html(){
+  if(!ehAdmin())return vazio('Só para administradores','Peça a um administrador para gerenciar a equipe.');
+  const eu=usuarioAtual();
+  const linhas=[...S.usuarios].sort((a,b)=>(a.papel==='admin'?0:1)-(b.papel==='admin'?0:1)||a.nome.localeCompare(b.nome)).map(u=>{
+    const inativo=u.ativo===false, souEu=u.id===eu?.id;
+    return `<div class="eq-row ${inativo?'off':''}">
+      <div class="eq-av">${esc((u.nome||'?')[0].toUpperCase())}</div>
+      <div class="i-main">
+        <div class="i-t">${esc(u.nome)} <span class="badge ${PAPEL_BADGE[u.papel]||'b-cream'}">${PAPEIS[u.papel]||esc(u.papel)}</span>${souEu?' <span class="badge b-cream">você</span>':''}${inativo?' <span class="badge b-red">inativo</span>':''}</div>
+        <div class="i-s">@${esc(u.user)}${u.email?' · 📧 '+esc(u.email):' · <span style="color:var(--amarelo)">sem e-mail (não recebe reset)</span>'}</div>
+      </div>
+      <div class="rowflex nowrap" style="gap:5px">
+        <button class="btn sm soft" data-act="form-usuario" data-id="${u.id}">✏️ Editar</button>
+        <button class="btn sm soft" data-act="adm-reset-senha" data-id="${u.id}">🔑 Senha</button>
+        <button class="btn sm soft" data-act="adm-novo-codigo" data-id="${u.id}">🎟️ Código</button>
+        ${souEu?'':`<button class="btn sm ${inativo?'gold':'ghost'}" data-act="adm-ativo" data-id="${u.id}">${inativo?'▶ Reativar':'⏸ Desativar'}</button>
+        <button class="btn icon danger" data-act="adm-excluir" data-id="${u.id}" title="Excluir acesso">🗑</button>`}
+      </div>
+    </div>`;}).join('');
+  const permGrid=(papel)=>`<div class="perm-grid">${ROTAS_PERM.map(([r,l])=>{
+    const on=(S.config.permissoes[papel]||[]).includes(r);
+    return `<button class="perm-chk ${on?'on':''}" data-act="perm-toggle" data-papel="${papel}" data-rota="${r}">${on?'✓':''} ${l}</button>`;}).join('')}</div>`;
+  return `
+  <div class="card"><h3>👥 Pessoas <span class="sp"></span><button class="btn primary sm" data-act="form-usuario">＋ Nova pessoa</button></h3>
+    <div class="small muted mb">Cada pessoa entra com o próprio usuário e senha. O que ela vê depende do papel.</div>
+    ${linhas||'<div class="small muted">Ninguém cadastrado ainda.</div>'}
+  </div>
+  <div class="card"><h3>🗝️ O que cada papel vê</h3>
+    <div class="small muted mb">Administradores sempre veem tudo (inclusive Equipe e Configurações). Marque abaixo as áreas dos demais papéis.</div>
+    <div class="label">🥇 Caixa</div>${permGrid('caixa')}
+    <div class="label mt">🤵 Garçom</div>${permGrid('garcom')}
+  </div>
+  <div class="card"><h3>📧 E-mail de redefinição de senha</h3>
+    <div class="small muted mb">O envio usa a função <b>/api/reset</b> publicada junto com o app na Vercel + o serviço Resend.
+      Configure na Vercel as variáveis <b>RESEND_API_KEY</b> (obrigatória) e <b>RESET_FROM</b> (remetente verificado, ex.: <i>Subsolo Café &lt;acesso@seudominio.com.br&gt;</i>).
+      Sem isso, o "esqueci minha senha" continua funcionando pelo código de recuperação.</div>
+    <div class="rowflex">
+      <input class="input" id="eq_test_email" type="email" placeholder="seu@email.com" style="max-width:280px" value="${esc(eu?.email||'')}">
+      <button class="btn gold" data-act="equipe-teste-email">Enviar e-mail de teste</button>
+    </div>
+    <div id="eq_test_out" class="small mt"></div>
+  </div>`;
+}};
+function formUsuario(id){
+  const u=id?S.usuarios.find(x=>x.id===id):null;
+  const d=u?clone(u):{nome:'',email:'',user:'',papel:'caixa'};
+  PEND.usuarioEdit=id||null;
+  openModal(`${mHead(u?'Editar pessoa':'Nova pessoa')}
+    <div class="grid2">
+    ${campo('Nome',`<input class="input" id="eq_nome" value="${esc(d.nome)}" placeholder="ex.: Maria Souza">`)}
+    ${campo('E-mail (recebe o código de reset)',`<input class="input" id="eq_email" type="email" value="${esc(d.email||'')}" placeholder="maria@gmail.com">`)}
+    </div>
+    <div class="grid2">
+    ${campo('Usuário (login)',`<input class="input" id="eq_user" autocapitalize="none" value="${esc(d.user)}" placeholder="ex.: maria">`)}
+    ${campo('Papel',selHTML('eq_papel',Object.entries(PAPEIS),d.papel))}
+    </div>
+    ${u?'':`<div class="grid2">
+    ${campo('Senha (mín. 4)',`<input class="input" id="eq_pass" type="password" autocomplete="new-password">`)}
+    ${campo('Repita a senha',`<input class="input" id="eq_pass2" type="password" autocomplete="new-password">`)}
+    </div>`}
+    <div class="m-actions"><button class="btn soft" data-act="fechar-modal">Cancelar</button>
+    <button class="btn primary" data-act="salvar-usuario">${u?'Salvar':'Criar acesso'}</button></div>`);
+}
+function modalCodigoRec(nome,codigo){
+  openModal(`${mHead('Código de recuperação — '+esc(nome))}
+    <div class="small muted mb">Entregue este código para a pessoa guardar (impresso ou no celular). É a chave dela se esquecer a senha e o e-mail falhar. <b>Ele não aparece de novo.</b></div>
+    <div class="auth-code">${esc(codigo)}</div>
+    <div class="m-actions"><button class="btn primary" data-act="fechar-modal">Anotado ✓</button></div>`);
+}
 function despRow(d){
   return `<div class="rowflex desp-row" data-id="${d.id}" style="margin-bottom:6px">
     <input class="input desp-nome" style="flex:1" placeholder="Ex.: Aluguel" value="${esc(d.nome)}" data-chg="desp-edit">
@@ -3174,15 +3346,18 @@ function despRow(d){
 
 /* =================== MAIS (mobile) =================== */
 ROUTES.mais={titulo:()=>'Mais',html(){
+  const u=usuarioAtual();
   const extras=[['producao','🔥','Produção'],['agenda','📅','Agenda'],['estoque','📦','Estoque'],['compras','🧺','Compras'],
     ['relatorios','📈','Relatórios'],['clientes','👥','Clientes'],['catalogo','🏷️','Produtos'],
     ['receitas','🧾','Receitas'],['cardapio','📜','Cardápio'],['precificacao','💰','Precificação'],
-    ['insumos','🧂','Insumos'],['config','⚙️','Config']];
+    ['insumos','🧂','Insumos'],['equipe','🔐','Equipe'],['config','⚙️','Config']].filter(([r])=>podeVer(r));
   return `<div class="card dark" style="text-align:center">${BEAN('',40,54)}
     <div class="lk-1" style="font-size:22px">SUB SOLO</div><div class="lk-2">— CAFÉ BRISTOL —</div>
-    <div class="small mt" style="opacity:.85">gestão artesanal, num arquivo só</div></div>
+    <div class="small mt" style="opacity:.85">gestão artesanal, num arquivo só</div>
+    ${u?`<div class="small mt" style="opacity:.9">👤 <b>${esc(u.nome)}</b> · ${PAPEIS[u.papel]||esc(u.papel)}</div>`:''}</div>
   <div class="menu-grid">${extras.map(([r,ic,l])=>`<button data-act="ir" data-route="${r}"><span class="ic">${ic}</span>${l}${navBadge(r)}</button>`).join('')}</div>
-  <button class="btn soft block mt" data-act="exportar">🛟 Fazer backup agora</button>
+  <button class="btn soft block mt" data-act="trocar-senha">🔑 Trocar minha senha</button>
+  ${ehAdmin()?`<button class="btn soft block mt" data-act="exportar">🛟 Fazer backup agora</button>`:''}
   <button class="btn danger block mt" data-act="sair">🔒 Sair do sistema</button>`;
 }};
 
@@ -3266,16 +3441,20 @@ const ACTIONS={
   'dash-tab':(d)=>{R.tmp.dashTab=d.v;refresh();},
   'ir':(d)=>{closeAllModals();const params=d.filtro?{filtro:d.filtro}:{};go(d.route,params);},
   'nova-acao':()=>{
-    openModal(`${mHead('O que vamos lançar?')}
-      <div class="grid2">
-        <button class="card clk" data-act="nova-balcao" style="text-align:center;margin:0"><div style="font-size:34px">🛎️</div><b>Venda no balcão</b><div class="small muted">para quem leva agora</div></button>
-        <button class="card clk" data-act="nova-encomenda" style="text-align:center;margin:0"><div style="font-size:34px">📋</div><b>Encomenda / delivery</b><div class="small muted">para entregar depois</div></button>
-      </div>`);
+    const ops=[];
+    if(podeVer('balcao'))ops.push(`<button class="card clk" data-act="nova-balcao" style="text-align:center;margin:0"><div style="font-size:34px">🛎️</div><b>Venda no balcão</b><div class="small muted">para quem leva agora</div></button>`);
+    if(podeVer('pedidos'))ops.push(`<button class="card clk" data-act="nova-encomenda" style="text-align:center;margin:0"><div style="font-size:34px">📋</div><b>Encomenda / delivery</b><div class="small muted">para entregar depois</div></button>`);
+    if(!ops.length)return;
+    if(ops.length===1){ACTIONS[podeVer('balcao')?'nova-balcao':'nova-encomenda']();return;}
+    openModal(`${mHead('O que vamos lançar?')}<div class="grid2">${ops.join('')}</div>`);
   },
-  'nova-balcao':()=>{closeAllModals();R.tmp.mesaSel=S.config.modoBalcao==='mesas'?null:'avulsa';if(S.config.modoBalcao!=='mesas')R.tmp.avulsa={itens:[],forma:'pix',clienteId:''};go('balcao');},
-  'nova-encomenda':()=>{closeAllModals();go('pedidos');formPedido();},
-  'exportar':()=>exportarJSON(),
+  'nova-balcao':()=>{if(!podeVer('balcao')){toast('Seu acesso não inclui o balcão.','warn');return;}
+    closeAllModals();R.tmp.mesaSel=S.config.modoBalcao==='mesas'?null:'avulsa';if(S.config.modoBalcao!=='mesas')R.tmp.avulsa={itens:[],forma:'pix',clienteId:''};go('balcao');},
+  'nova-encomenda':()=>{if(!podeVer('pedidos')){toast('Seu acesso não inclui encomendas.','warn');return;}
+    closeAllModals();go('pedidos');formPedido();},
+  'exportar':()=>{if(!ehAdmin()){toast('Só administradores exportam o backup.','warn');return;}exportarJSON();},
   'concluir-tarefa':(d)=>{const t=S.tarefas.find(x=>x.id===d.id);if(!t)return;
+    if(t.tipo==='producao'&&!podeVer('producao')){toast('Seu acesso não inclui a produção.','warn');return;}
     if(t.tipo==='producao'&&!t.concluida){modalConcluirProducao(t);}
     else{t.concluida=!t.concluida;commitR();}},
   'confirmar-producao':(d)=>{const t=S.tarefas.find(x=>x.id===d.id);if(!t)return;
@@ -3543,8 +3722,8 @@ const ACTIONS={
     for(const k of ['categorias','insumos','receitas','produtos','clientes','pedidos','lotesProntos','perdas','cardapios','despesas','comandas'])
       S[k]=S[k].filter(x=>!x.demo);
     S.compras=[];S.tarefas=[];commitR();toast('Dados de exemplo removidos.');},'Apagar exemplo'),
-  'zerar-tudo':()=>confirmar('Isso apaga TUDO e recomeça do zero. Fez backup? Não dá para desfazer.',()=>{
-    S=estadoVazio();persist();go('dash');toast('Tudo limpo. Recomece quando quiser. ☕');},'Apagar tudo'),
+  'zerar-tudo':()=>confirmar('Isso apaga TUDO (inclusive os acessos da equipe) e recomeça do zero. Fez backup? Não dá para desfazer.',()=>{
+    S=estadoVazio();UID=null;limparSessao();persist();closeAllModals();mostrarSetup();toast('Tudo limpo. Crie o acesso do administrador para recomeçar. ☕');},'Apagar tudo'),
   // GENÉRICOS
   'seg':(d)=>{const grupo=d.grupo;$$(`#${grupo} [data-act="seg"]`).forEach(b=>b.classList.toggle('on',b.dataset.v===d.v));
     if(grupo==='cm_forma')PEND.fecharForma=d.v;
@@ -3566,49 +3745,161 @@ const ACTIONS={
   'fechar-modal':()=>closeModal(),
   'confirmar-sim':()=>{const cb=PEND.confirm;PEND.confirm=null;closeModal();if(cb)cb();},
   // ACESSO / LOGIN
-  'sair':()=>{limparSessao();closeAllModals();mostrarLogin();},
-  'auth-login':async()=>{const user=($('#au_user')?.value||'').trim(),pass=$('#au_pass')?.value||'';
-    if(!user||!pass){erroAuth('Preencha usuário e senha.');return;}
-    const h=await hashSenha(pass,S.auth.salt);
-    if(user.toLowerCase()===String(S.auth.user).toLowerCase()&&h===S.auth.hash){salvarSessao();bootApp();toast(`Bem-vindo, ${esc(S.auth.user)}! ☕`);}
+  'sair':()=>{UID=null;limparSessao();closeAllModals();mostrarLogin();},
+  'auth-login':async()=>{const login=($('#au_user')?.value||'').trim().toLowerCase(),pass=$('#au_pass')?.value||'';
+    if(!login||!pass){erroAuth('Preencha usuário e senha.');return;}
+    const u=S.usuarios.find(x=>String(x.user).toLowerCase()===login||(x.email&&String(x.email).toLowerCase()===login));
+    if(u&&u.ativo===false){erroAuth('Este acesso foi desativado. Fale com o administrador.');return;}
+    const h=u?await hashSenha(pass,u.salt):null;
+    if(u&&h===u.hash){UID=u.id;salvarSessao();bootApp();toast(`Bem-vindo, ${esc(u.nome.split(' ')[0])}! ☕`);}
     else{erroAuth('Usuário ou senha incorretos.');const p=$('#au_pass');if(p){p.value='';p.focus();}}},
-  'auth-setup':async()=>{const user=($('#su_user')?.value||'').trim(),p1=$('#su_pass')?.value||'',p2=$('#su_pass2')?.value||'';
+  'auth-setup':async()=>{const nome=($('#su_nome')?.value||'').trim(),email=($('#su_email')?.value||'').trim(),
+      user=($('#su_user')?.value||'').trim(),p1=$('#su_pass')?.value||'',p2=$('#su_pass2')?.value||'';
+    if(!nome)return erroAuth('Diga seu nome.');
     if(!user)return erroAuth('Escolha um nome de usuário.');
+    if(email&&!/^\S+@\S+\.\S+$/.test(email))return erroAuth('Esse e-mail não parece válido.');
     if(p1.length<4)return erroAuth('A senha precisa de ao menos 4 caracteres.');
     if(p1!==p2)return erroAuth('As senhas não são iguais.');
     const salt=novoSalt(),hash=await hashSenha(p1,salt);
     const rec=novoCodigoRec(),recSalt=novoSalt(),recHash=await hashSenha(rec,recSalt);
-    S.auth={user,salt,hash,recSalt,recHash,travarSempre:false};persist();mostrarCodigoRec(rec);},
-  'auth-rec-ok':()=>{salvarSessao();bootApp();toast('Acesso criado. Bem-vindo! ☕');},
+    const novo={id:'u_'+uid(),nome,user,email,papel:'admin',salt,hash,recSalt,recHash,ativo:true,criadoEm:Date.now()};
+    S.usuarios.push(novo);PEND.entrarUid=novo.id;persist();mostrarCodigoRec(rec);},
+  'auth-rec-ok':()=>{if(PEND.entrarUid){UID=PEND.entrarUid;PEND.entrarUid=null;}
+    salvarSessao();bootApp();toast('Tudo certo. Bem-vindo! ☕');},
   'auth-esqueci':()=>mostrarRecuperar(),
   'auth-voltar-login':()=>mostrarLogin(),
-  'auth-recuperar':async()=>{const code=($('#rc_code')?.value||'').trim().toUpperCase(),p1=$('#rc_p1')?.value||'',p2=$('#rc_p2')?.value||'';
-    const h=await hashSenha(code,S.auth.recSalt);
-    if(h!==S.auth.recHash)return erroAuth('Código de recuperação inválido.');
+  'auth-rec-user':()=>{const login=($('#rq_user')?.value||'').trim().toLowerCase();
+    if(!login)return erroAuth('Digite seu usuário ou e-mail.');
+    const u=S.usuarios.find(x=>String(x.user).toLowerCase()===login||(x.email&&String(x.email).toLowerCase()===login));
+    if(!u)return erroAuth('Não achei esse usuário. Confira a grafia ou fale com o administrador.');
+    if(u.ativo===false)return erroAuth('Este acesso foi desativado. Fale com o administrador.');
+    PEND.recUid=u.id;mostrarRecuperarOpcoes(u);},
+  'auth-rec-email':async(d,el)=>{const u=S.usuarios.find(x=>x.id===PEND.recUid);if(!u||!u.email)return;
+    el.disabled=true;el.textContent='Enviando…';
+    try{const j=await apiReset({acao:'enviar',email:u.email,nome:u.nome});
+      PEND.resetToken=j.token;mostrarRecuperarEmail(u);}
+    catch(e){el.disabled=false;el.textContent='📧 Receber código por e-mail';
+      erroAuth(e.message+' Você ainda pode usar o código de recuperação abaixo.');}},
+  'auth-rec-email-ok':async()=>{const u=S.usuarios.find(x=>x.id===PEND.recUid);if(!u)return;
+    const cod=($('#re_cod')?.value||'').trim(),p1=$('#re_p1')?.value||'',p2=$('#re_p2')?.value||'';
+    if(!/^\d{6}$/.test(cod))return erroAuth('O código tem 6 números — confira no e-mail.');
     if(p1.length<4)return erroAuth('A senha precisa de ao menos 4 caracteres.');
     if(p1!==p2)return erroAuth('As senhas não são iguais.');
-    const salt=novoSalt();S.auth.salt=salt;S.auth.hash=await hashSenha(p1,salt);
-    const rec=novoCodigoRec(),recSalt=novoSalt();S.auth.recSalt=recSalt;S.auth.recHash=await hashSenha(rec,recSalt);
-    persist();mostrarCodigoRec(rec);},
-  'auth-travar':(d)=>{if(!S.auth)return;S.auth.travarSempre=d.v==='sim';if(S.auth.travarSempre)limparSessao();else salvarSessao();persist();refresh();},
-  'trocar-senha':()=>{openModal(`${mHead('Trocar senha')}
+    const btn=$('#re_btn');if(btn){btn.disabled=true;btn.textContent='Verificando…';}
+    try{await apiReset({acao:'verificar',token:PEND.resetToken,codigo:cod});}
+    catch(e){if(btn){btn.disabled=false;btn.textContent='Redefinir senha e entrar';}return erroAuth(e.message);}
+    const salt=novoSalt();u.salt=salt;u.hash=await hashSenha(p1,salt);
+    PEND.resetToken=null;persist();
+    UID=u.id;salvarSessao();bootApp();toast('Senha redefinida. Bem-vindo de volta! ☕');},
+  'auth-rec-codigo':()=>{const u=S.usuarios.find(x=>x.id===PEND.recUid);if(u)mostrarRecuperarCodigo(u);},
+  'auth-recuperar':async()=>{const u=S.usuarios.find(x=>x.id===PEND.recUid);if(!u)return;
+    const code=($('#rc_code')?.value||'').trim().toUpperCase(),p1=$('#rc_p1')?.value||'',p2=$('#rc_p2')?.value||'';
+    const h=await hashSenha(code,u.recSalt);
+    if(h!==u.recHash)return erroAuth('Código de recuperação inválido.');
+    if(p1.length<4)return erroAuth('A senha precisa de ao menos 4 caracteres.');
+    if(p1!==p2)return erroAuth('As senhas não são iguais.');
+    const salt=novoSalt();u.salt=salt;u.hash=await hashSenha(p1,salt);
+    const rec=novoCodigoRec(),recSalt=novoSalt();u.recSalt=recSalt;u.recHash=await hashSenha(rec,recSalt);
+    PEND.entrarUid=u.id;persist();mostrarCodigoRec(rec);},
+  'auth-travar':(d)=>{S.config.travarSempre=d.v==='sim';
+    if(S.config.travarSempre)limparSessao();else salvarSessao();persist();refresh();},
+  'trocar-senha':()=>{if(!usuarioAtual())return;openModal(`${mHead('Trocar minha senha')}
     ${campo('Senha atual',`<input class="input" id="ts_atual" type="password" autocomplete="current-password">`)}
     ${campo('Nova senha',`<input class="input" id="ts_nova" type="password" autocomplete="new-password">`)}
     ${campo('Repita a nova senha',`<input class="input" id="ts_nova2" type="password" autocomplete="new-password">`)}
     <div class="m-actions"><button class="btn soft" data-act="fechar-modal">Cancelar</button>
     <button class="btn primary" data-act="trocar-senha-ok">Salvar nova senha</button></div>`);},
-  'trocar-senha-ok':async()=>{const at=$('#ts_atual')?.value||'',n1=$('#ts_nova')?.value||'',n2=$('#ts_nova2')?.value||'';
-    const hAt=await hashSenha(at,S.auth.salt);
-    if(hAt!==S.auth.hash){toast('Senha atual incorreta.','warn');return;}
+  'trocar-senha-ok':async()=>{const u=usuarioAtual();if(!u)return;
+    const at=$('#ts_atual')?.value||'',n1=$('#ts_nova')?.value||'',n2=$('#ts_nova2')?.value||'';
+    const hAt=await hashSenha(at,u.salt);
+    if(hAt!==u.hash){toast('Senha atual incorreta.','warn');return;}
     if(n1.length<4){toast('A nova senha precisa de ao menos 4 caracteres.','warn');return;}
     if(n1!==n2){toast('As senhas não são iguais.','warn');return;}
-    const salt=novoSalt();S.auth.salt=salt;S.auth.hash=await hashSenha(n1,salt);persist();closeAllModals();toast('Senha atualizada. ✓');},
-  'trocar-usuario':()=>{openModal(`${mHead('Trocar usuário')}
-    ${campo('Nome de usuário',`<input class="input" id="tu_user" value="${esc(S.auth.user)}">`)}
+    const salt=novoSalt();u.salt=salt;u.hash=await hashSenha(n1,salt);persist();closeAllModals();toast('Senha atualizada. ✓');},
+  'trocar-usuario':()=>{const u=usuarioAtual();if(!u)return;openModal(`${mHead('Trocar meu usuário')}
+    ${campo('Nome de usuário',`<input class="input" id="tu_user" value="${esc(u.user)}">`)}
     <div class="m-actions"><button class="btn soft" data-act="fechar-modal">Cancelar</button>
     <button class="btn primary" data-act="trocar-usuario-ok">Salvar</button></div>`);},
-  'trocar-usuario-ok':()=>{const u=($('#tu_user')?.value||'').trim();if(!u){toast('Informe um usuário.','warn');return;}
-    S.auth.user=u;salvarSessao();persist();closeAllModals();toast('Usuário atualizado.');}
+  'trocar-usuario-ok':()=>{const u=usuarioAtual();if(!u)return;
+    const nu=($('#tu_user')?.value||'').trim();if(!nu){toast('Informe um usuário.','warn');return;}
+    if(loginColide(u.id,nu,u.email)){toast('Esse usuário já pertence a outra pessoa da equipe.','warn');return;}
+    u.user=nu;salvarSessao();persist();closeAllModals();toast('Usuário atualizado.');},
+  // EQUIPE & ACESSOS (admin)
+  'form-usuario':(d)=>{if(!ehAdmin())return;formUsuario(d.id||null);},
+  'salvar-usuario':async()=>{if(!ehAdmin())return;
+    const id=PEND.usuarioEdit;
+    const nome=($('#eq_nome')?.value||'').trim(),email=($('#eq_email')?.value||'').trim(),
+      user=($('#eq_user')?.value||'').trim(),papel=$('#eq_papel')?.value||'caixa';
+    if(!nome){toast('Diga o nome da pessoa.','warn');return;}
+    if(!user){toast('Escolha o usuário de login.','warn');return;}
+    if(email&&!/^\S+@\S+\.\S+$/.test(email)){toast('Esse e-mail não parece válido.','warn');return;}
+    if(!PAPEIS[papel]){toast('Papel inválido.','warn');return;}
+    if(loginColide(id,user,email)){toast('Esse usuário ou e-mail já pertence a outra pessoa da equipe.','warn');return;}
+    if(id){
+      const u=S.usuarios.find(x=>x.id===id);if(!u)return;
+      if(u.papel==='admin'&&papel!=='admin'&&u.ativo!==false&&adminsAtivos()<=1){toast('Precisa restar ao menos um administrador ativo.','warn');return;}
+      Object.assign(u,{nome,email,user,papel});
+      closeAllModals();persist();
+      if(!podeVer(R.route))go(rotaInicial());else render();
+      toast(`Dados de ${esc(nome.split(' ')[0])} atualizados.`);
+    }else{
+      const p1=$('#eq_pass')?.value||'',p2=$('#eq_pass2')?.value||'';
+      if(p1.length<4){toast('A senha precisa de ao menos 4 caracteres.','warn');return;}
+      if(p1!==p2){toast('As senhas não são iguais.','warn');return;}
+      const salt=novoSalt(),hash=await hashSenha(p1,salt);
+      const rec=novoCodigoRec(),recSalt=novoSalt(),recHash=await hashSenha(rec,recSalt);
+      S.usuarios.push({id:'u_'+uid(),nome,email,user,papel,salt,hash,recSalt,recHash,ativo:true,criadoEm:Date.now()});
+      closeAllModals();persist();render();
+      modalCodigoRec(nome,rec);
+    }},
+  'adm-reset-senha':(d)=>{if(!ehAdmin())return;const u=S.usuarios.find(x=>x.id===d.id);if(!u)return;
+    PEND.usuarioEdit=u.id;
+    openModal(`${mHead('Redefinir senha — '+esc(u.nome))}
+      ${campo('Nova senha (mín. 4)',`<input class="input" id="rs_p1" type="password" autocomplete="new-password">`)}
+      ${campo('Repita a nova senha',`<input class="input" id="rs_p2" type="password" autocomplete="new-password">`)}
+      <div class="small muted mb">Combine com a pessoa de trocar a senha depois que entrar (Mais → Trocar minha senha).</div>
+      <div class="m-actions"><button class="btn soft" data-act="fechar-modal">Cancelar</button>
+      <button class="btn primary" data-act="adm-reset-senha-ok">Salvar nova senha</button></div>`);},
+  'adm-reset-senha-ok':async()=>{if(!ehAdmin())return;
+    const u=S.usuarios.find(x=>x.id===PEND.usuarioEdit);if(!u)return;
+    const p1=$('#rs_p1')?.value||'',p2=$('#rs_p2')?.value||'';
+    if(p1.length<4){toast('A senha precisa de ao menos 4 caracteres.','warn');return;}
+    if(p1!==p2){toast('As senhas não são iguais.','warn');return;}
+    const salt=novoSalt();u.salt=salt;u.hash=await hashSenha(p1,salt);
+    persist();closeAllModals();toast(`Senha de ${esc(u.nome.split(' ')[0])} redefinida.`);},
+  'adm-novo-codigo':(d)=>{if(!ehAdmin())return;const u=S.usuarios.find(x=>x.id===d.id);if(!u)return;
+    confirmar(`Gerar um novo código de recuperação para ${esc(u.nome)}? O código antigo deixa de valer.`,async()=>{
+      const rec=novoCodigoRec(),recSalt=novoSalt();u.recSalt=recSalt;u.recHash=await hashSenha(rec,recSalt);
+      persist();modalCodigoRec(u.nome,rec);},'Gerar código');},
+  'adm-ativo':(d)=>{if(!ehAdmin())return;const u=S.usuarios.find(x=>x.id===d.id);if(!u||u.id===UID)return;
+    if(u.ativo!==false&&u.papel==='admin'&&adminsAtivos()<=1){toast('Precisa restar ao menos um administrador ativo.','warn');return;}
+    u.ativo=u.ativo===false;persist();render();
+    toast(`${esc(u.nome.split(' ')[0])} ${u.ativo?'reativado(a)':'desativado(a)'}.`);},
+  'adm-excluir':(d)=>{if(!ehAdmin())return;const u=S.usuarios.find(x=>x.id===d.id);if(!u||u.id===UID)return;
+    if(u.papel==='admin'&&u.ativo!==false&&adminsAtivos()<=1){toast('Precisa restar ao menos um administrador ativo.','warn');return;}
+    confirmar(`Excluir o acesso de ${esc(u.nome)}? Esta ação não tem volta.`,()=>{
+      S.usuarios=S.usuarios.filter(x=>x.id!==u.id);persist();render();toast('Acesso excluído.');},'Excluir');},
+  'perm-toggle':(d)=>{if(!ehAdmin())return;
+    const arr=S.config.permissoes[d.papel]??=[];
+    const i=arr.indexOf(d.rota);
+    if(i>=0)arr.splice(i,1);else arr.push(d.rota);
+    persist();render();},
+  'equipe-teste-email':async(d,el)=>{if(!ehAdmin())return;
+    const email=($('#eq_test_email')?.value||'').trim(),out=$('#eq_test_out');
+    if(!/^\S+@\S+\.\S+$/.test(email)){if(out)out.innerHTML='<span style="color:var(--verm)">Digite um e-mail válido.</span>';return;}
+    el.disabled=true;el.textContent='Enviando…';
+    try{const j=await apiReset({acao:'enviar',email,nome:'Teste de configuração'});
+      PEND.testeToken=j.token;
+      if(out)out.innerHTML=`<span style="color:var(--verde)">✓ E-mail enviado para ${esc(email)}.</span> Digite o código recebido para validar a volta:
+        <div class="rowflex mt"><input class="input" id="eq_test_cod" inputmode="numeric" placeholder="000000" style="max-width:130px">
+        <button class="btn sm gold" data-act="equipe-teste-verificar">Validar código</button></div>
+        <div id="eq_test_msg" class="mt"></div>`;}
+    catch(e){if(out)out.innerHTML=`<span style="color:var(--verm)">✗ ${esc(e.message)}</span>`;}
+    el.disabled=false;el.textContent='Enviar e-mail de teste';},
+  'equipe-teste-verificar':async()=>{const out=$('#eq_test_out'),msg=$('#eq_test_msg'),cod=($('#eq_test_cod')?.value||'').trim();
+    try{await apiReset({acao:'verificar',token:PEND.testeToken,codigo:cod});
+      if(out)out.innerHTML='<span style="color:var(--verde)">✓ Tudo certo! Envio e verificação funcionando — o "esqueci minha senha" por e-mail está ativo.</span>';}
+    catch(e){if(msg)msg.innerHTML=`<span style="color:var(--verm)">✗ ${esc(e.message)}</span>`;}}
 };
 function lerForns(){return $$('#in_forns .forn-row').map(row=>({id:row.dataset.fid,
   nome:row.querySelector('.forn-nome').value,preco:+row.querySelector('.forn-preco').value||0,
@@ -3682,11 +3973,14 @@ document.addEventListener('keydown',e=>{
 /* =================== ACESSO · LOGIN =================== */
 const SESKEY='subsolo-sessao';
 function sessaoValida(){
-  if(!S.auth||!S.auth.hash)return false;
-  if(S.auth.travarSempre)return false;
-  try{const r=localStorage.getItem(SESKEY);if(!r)return false;const s=JSON.parse(r);return s&&s.user===S.auth.user;}catch(e){return false;}
+  if(!S.usuarios.length)return false;
+  if(S.config.travarSempre)return false;
+  try{const r=localStorage.getItem(SESKEY);if(!r)return false;const s=JSON.parse(r);
+    const u=s&&s.uid?S.usuarios.find(x=>x.id===s.uid&&x.ativo!==false):null;
+    if(!u)return false; UID=u.id; return true;
+  }catch(e){return false;}
 }
-function salvarSessao(){try{localStorage.setItem(SESKEY,JSON.stringify({user:S.auth.user,em:Date.now()}));}catch(e){}}
+function salvarSessao(){try{const u=usuarioAtual();if(u)localStorage.setItem(SESKEY,JSON.stringify({uid:u.id,em:Date.now()}));}catch(e){}}
 function limparSessao(){try{localStorage.removeItem(SESKEY);}catch(e){}}
 async function hashSenha(senha,salt){
   const txt=(salt||'')+'::'+senha;
@@ -3720,22 +4014,52 @@ function mostrarLogin(){
   setTimeout(()=>$('#au_user')?.focus(),60);
 }
 function mostrarSetup(){
-  telaAuth(`<div class="auth-h">Primeiro acesso</div><div class="auth-sub">Crie o login que vai proteger o sistema</div>
+  telaAuth(`<div class="auth-h">Primeiro acesso</div><div class="auth-sub">Crie o acesso do administrador. Depois, cadastre a equipe em <b>Equipe & Acessos</b>.</div>
     <div id="auth_err"></div>
-    <div class="field"><label class="label">Usuário</label><input class="input" id="su_user" autocomplete="username" placeholder="ex.: subsolo"></div>
+    <div class="field"><label class="label">Seu nome</label><input class="input" id="su_nome" autocomplete="name" placeholder="ex.: Wallan"></div>
+    <div class="field"><label class="label">E-mail (para recuperar a senha)</label><input class="input" id="su_email" type="email" autocomplete="email" placeholder="voce@email.com"></div>
+    <div class="field"><label class="label">Usuário</label><input class="input" id="su_user" autocomplete="username" autocapitalize="none" placeholder="ex.: subsolo"></div>
     <div class="field"><label class="label">Senha</label><input class="input" id="su_pass" type="password" autocomplete="new-password" placeholder="crie uma senha (mín. 4)"></div>
     <div class="field"><label class="label">Repita a senha</label><input class="input" id="su_pass2" type="password" autocomplete="new-password" placeholder="digite de novo"></div>
     <button class="btn primary lg" data-act="auth-setup">Criar acesso</button>`);
-  setTimeout(()=>$('#su_user')?.focus(),60);
+  setTimeout(()=>$('#su_nome')?.focus(),60);
 }
 function mostrarCodigoRec(codigo){
   telaAuth(`<div class="auth-h">Guarde seu código de recuperação</div>
-    <div class="auth-sub">Se um dia esquecer a senha, só este código destrava o sistema. Anote em lugar seguro.</div>
+    <div class="auth-sub">Se um dia esquecer a senha e o e-mail falhar, só este código destrava seu acesso. Anote em lugar seguro.</div>
     <div class="auth-code">${esc(codigo)}</div>
     <button class="btn primary lg" data-act="auth-rec-ok">Anotei — entrar no sistema</button>`);
 }
 function mostrarRecuperar(){
-  telaAuth(`<div class="auth-h">Recuperar acesso</div><div class="auth-sub">Digite o código de recuperação para criar uma nova senha</div>
+  telaAuth(`<div class="auth-h">Recuperar acesso</div><div class="auth-sub">Diga quem é você para escolher como redefinir a senha</div>
+    <div id="auth_err"></div>
+    <div class="field"><label class="label">Usuário ou e-mail</label><input class="input" id="rq_user" autocapitalize="none" placeholder="seu login ou e-mail"></div>
+    <button class="btn primary lg" data-act="auth-rec-user">Continuar</button>
+    <div class="auth-link"><button data-act="auth-voltar-login">Voltar</button></div>`);
+  setTimeout(()=>$('#rq_user')?.focus(),60);
+}
+function mostrarRecuperarOpcoes(u){
+  telaAuth(`<div class="auth-h">Olá, ${esc(u.nome.split(' ')[0])}</div><div class="auth-sub">Como você quer redefinir a senha?</div>
+    <div id="auth_err"></div>
+    ${u.email?`<button class="btn primary lg" data-act="auth-rec-email" style="width:100%;margin-bottom:10px">📧 Receber código por e-mail</button>
+      <div class="auth-sub" style="margin:0 0 14px">enviaremos para <b>${esc(mascaraEmail(u.email))}</b></div>`
+    :`<div class="auth-sub" style="margin-bottom:14px">⚠️ Seu cadastro não tem e-mail — use o código de recuperação ou peça ao administrador para redefinir sua senha.</div>`}
+    <button class="btn soft lg" data-act="auth-rec-codigo" style="width:100%">🎟️ Usar código de recuperação</button>
+    <div class="auth-link"><button data-act="auth-voltar-login">Voltar</button></div>`);
+}
+function mostrarRecuperarEmail(u){
+  telaAuth(`<div class="auth-h">Confira seu e-mail</div>
+    <div class="auth-sub">Enviamos um código de 6 números para <b>${esc(mascaraEmail(u.email))}</b>. Ele vale por 15 minutos.</div>
+    <div id="auth_err"></div>
+    <div class="field"><label class="label">Código do e-mail</label><input class="input" id="re_cod" inputmode="numeric" maxlength="6" placeholder="000000" style="font-family:var(--mono);letter-spacing:6px;text-align:center;font-size:20px"></div>
+    <div class="field"><label class="label">Nova senha</label><input class="input" id="re_p1" type="password" autocomplete="new-password"></div>
+    <div class="field"><label class="label">Repita a nova senha</label><input class="input" id="re_p2" type="password" autocomplete="new-password"></div>
+    <button class="btn primary lg" id="re_btn" data-act="auth-rec-email-ok">Redefinir senha e entrar</button>
+    <div class="auth-link"><button data-act="auth-voltar-login">Voltar</button></div>`);
+  setTimeout(()=>$('#re_cod')?.focus(),60);
+}
+function mostrarRecuperarCodigo(u){
+  telaAuth(`<div class="auth-h">Código de recuperação</div><div class="auth-sub">Digite o código de recuperação de <b>${esc(u.nome.split(' ')[0])}</b> para criar uma nova senha</div>
     <div id="auth_err"></div>
     <div class="field"><label class="label">Código de recuperação</label><input class="input" id="rc_code" placeholder="XXXX-XXXX" style="font-family:var(--mono);letter-spacing:2px;text-transform:uppercase"></div>
     <div class="field"><label class="label">Nova senha</label><input class="input" id="rc_p1" type="password" autocomplete="new-password"></div>
@@ -3752,6 +4076,7 @@ function bootApp(){
   gerarFixos();replanejar();persist();
   document.body.classList.remove('locked');
   $('#authGate').innerHTML='';
+  if(!podeVer(R.route)){R.route=rotaInicial();R.params={};}
   render();
 }
 function init(){
@@ -3761,12 +4086,14 @@ function init(){
   for(const p of S.perdas)if(p.custo===0&&p.demo){const s=p.tipo==='insumo'?insumoById(p.refId):skuById(p.refId);
     if(s)p.custo=arred(p.qtd*(p.tipo==='insumo'?custoUso(s):custoDiretoSKU(s)),2);}
   // portão de acesso
-  if(!S.auth||!S.auth.hash){mostrarSetup();return;}
+  if(!S.usuarios.length){mostrarSetup();return;}
   if(sessaoValida()){bootApp();return;}
   mostrarLogin();
 }
 // expõe engines para testes
-window.__app={get S(){return S},set S(v){S=v},migrar,seed,estadoVazio,bootApp,mostrarLogin,mostrarSetup,hashSenha,
+window.__app={get S(){return S},set S(v){S=v},get UID(){return UID},set UID(v){UID=v},
+  podeVer,rotaInicial,usuarioAtual,ehAdmin,adminsAtivos,PAPEIS,
+  migrar,seed,estadoVazio,bootApp,mostrarLogin,mostrarSetup,hashSenha,
   precoDe,metric,mcSKU,custoDiretoSKU,custoIngSKU,custoUso,custoLoteR,
   impostoInfo,impostoPct,rbt12Auto,deducoes,precoAlvo,matrizCat,classeDe,
   dreMes,entradasDia,saidasDia,gavetaEsperado,fluxoSerie,caixaDia,aPagarResumo,aReceberLista,
