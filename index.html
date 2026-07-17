@@ -1728,7 +1728,7 @@ function podeVer(rota){
   const u=usuarioAtual();
   if(!u||u.papel==='admin')return true;
   if(rota==='mais')return true;
-  if(rota==='config'||rota==='equipe')return false;
+  if(rota==='config'||rota==='equipe'||rota==='historico')return false;
   return (S.config.permissoes?.[u.papel]||[]).includes(rota);
 }
 function rotaInicial(){
@@ -1762,6 +1762,7 @@ const R={route:'dash',params:{},tmp:{}};
 const PEND={};
 function go(route,params={}){
   if(!podeVer(route)){toast('Seu acesso não inclui esta área.','warn');route=rotaInicial();params={};}
+  if(route==='historico'&&R.route!=='historico')R.tmp.histLista=undefined; // recarrega a lista a cada visita
   R.route=route;R.params=params;render();window.scrollTo(0,0);
 }
 function refresh(){render();}
@@ -3435,7 +3436,8 @@ ROUTES.config={titulo:()=>'Configurações',html(){
         ?'Um arquivo é tudo. Exporte e envie para o outro aparelho para manter os dois em dia.'
         :'<b>☁️ Os aparelhos se sincronizam sozinhos</b> — quem entrar com o próprio acesso vê tudo em dia, sem trocar arquivo. O backup serve como cópia de segurança para recuperar de uma perda.'} ${storageOK?'':'<b>⚠ Este navegador não está salvando sozinho — exporte com frequência.</b>'}</div>
       <div class="rowflex"><button class="btn gold" data-act="exportar">⬇️ Exportar backup</button>
-      <label class="btn soft" style="cursor:pointer">⬆️ Importar backup<input type="file" accept="application/json,.json" style="display:none" data-chg="importar-arquivo"></label></div>
+      <label class="btn soft" style="cursor:pointer">⬆️ Importar backup<input type="file" accept="application/json,.json" style="display:none" data-chg="importar-arquivo"></label>
+      ${SYNC.off?'':`<button class="btn soft" data-act="ir" data-route="historico">🕘 Histórico e restauração</button>`}</div>
       <div class="tiny muted mt">Último backup: ${c.ultimoBackup?fData(dISO(new Date(c.ultimoBackup)))+' às '+new Date(c.ultimoBackup).toTimeString().slice(0,5):'nunca'}${SYNC.off?'':' · Restaurar um backup substitui os dados de <b>toda a equipe</b>.'}</div>
     </div>
     <div class="card"><h3>🛎️ Balcão</h3>
@@ -3595,6 +3597,50 @@ function modalCodigoRec(nome,codigo){
     <div class="auth-code">${esc(codigo)}</div>
     <div class="m-actions"><button class="btn primary" data-act="fechar-modal">Anotado ✓</button></div>`);
 }
+
+/* =================== HISTÓRICO DE VERSÕES (admin) =================== */
+function fDataHora(ms){const d=new Date(ms);
+  return fDataC(dISO(d))+' '+d.toTimeString().slice(0,5);}
+async function carregarHistorico(){
+  if(R.tmp.histCarregando)return; R.tmp.histCarregando=true; R.tmp.histErro=null;
+  const u=usuarioAtual();
+  try{ const r=await apiEstado({acao:'historico',uid:u.id,hash:u.hash});
+    if(r.ok){R.tmp.histLista=r.historico||[];R.tmp.histVAtual=r.versaoAtual;}
+    else R.tmp.histErro=r.erro||'não consegui carregar';}
+  catch(e){R.tmp.histErro=e.message;}
+  R.tmp.histCarregando=false;
+  if(R.route==='historico')render();
+}
+ROUTES.historico={titulo:()=>'Histórico e restauração',html(){
+  if(!ehAdmin())return vazio('Só para administradores','Peça a um administrador para acessar o histórico.');
+  if(SYNC.off)return `<div class="card"><h3>🕘 Histórico de versões</h3>
+    <div class="small muted">O histórico funciona junto com a sincronização entre aparelhos, que não está ativa neste ambiente. Use o backup em arquivo (Configurações) por enquanto.</div></div>`;
+  const lista=R.tmp.histLista;
+  let corpo;
+  if(R.tmp.histErro)corpo=`<div class="al warn"><span class="a-i">⚠️</span><span class="a-m">${esc(R.tmp.histErro)}</span></div>`;
+  else if(lista===undefined)corpo=`<div class="small muted">Carregando pontos de restauração…</div>`;
+  else if(!lista.length)corpo=`<div class="small muted">Ainda não há pontos salvos. Eles são criados automaticamente conforme você usa o sistema.</div>`;
+  else corpo=`<div class="tblwrap"><table class="tbl">
+    <tr><th>Quando</th><th>O que tinha</th><th></th><th></th></tr>
+    ${lista.map(h=>{const rz=h.resumo||{};
+      return `<tr>
+        <td><b>${fDataHora(h.em)}</b>${h.manual?` <span class="badge b-gold">${esc(h.rotulo||'ponto manual')}</span>`:' <span class="badge b-cream">auto</span>'}</td>
+        <td class="small muted">${nf(rz.pedidos||0)} pedidos · ${nf(rz.clientes||0)} clientes · ${nf(rz.produtos||0)} produtos · ${nf(rz.insumos||0)} insumos</td>
+        <td class="right"><button class="btn sm soft" data-act="hist-restaurar" data-k="${esc(h.k)}" data-quando="${esc(fDataHora(h.em))}">↩️ Restaurar</button></td>
+      </tr>`;}).join('')}
+  </table></div>`;
+  return `
+  <div class="rowflex mb2">
+    <button class="btn primary" data-act="hist-snapshot">💾 Salvar ponto agora</button>
+    <button class="btn soft" data-act="hist-atualizar">🔄 Atualizar</button>
+    <span class="sp"></span>
+    <button class="btn gold" data-act="exportar">⬇️ Baixar backup em arquivo</button>
+  </div>
+  <div class="card"><h3>🕘 Pontos de restauração</h3>
+    <div class="small muted mb">O sistema guarda o estado do café ao longo do tempo (a cada poucos minutos de uso, e sempre que você salva um ponto). Restaurar volta <b>tudo</b> a como estava naquele momento, em <b>todos os aparelhos</b> — e o estado atual fica guardado para você poder desfazer.</div>
+    ${corpo}
+  </div>`;
+},after(){ if(ehAdmin()&&!SYNC.off&&R.tmp.histLista===undefined&&!R.tmp.histCarregando)carregarHistorico(); }};
 function despRow(d){
   return `<div class="rowflex desp-row" data-id="${d.id}" style="margin-bottom:6px">
     <input class="input desp-nome" style="flex:1" placeholder="Ex.: Aluguel" value="${esc(d.nome)}" data-chg="desp-edit">
@@ -4191,6 +4237,32 @@ const ACTIONS={
     if(u.papel==='admin'&&u.ativo!==false&&adminsAtivos()<=1){toast('Precisa restar ao menos um administrador ativo.','warn');return;}
     confirmar(`Excluir o acesso de ${esc(u.nome)}? Esta ação não tem volta.`,()=>{
       S.usuarios=S.usuarios.filter(x=>x.id!==u.id);persist();render();toast('Acesso excluído.');},'Excluir');},
+  'hist-atualizar':()=>{R.tmp.histLista=undefined;render();},
+  'hist-snapshot':()=>{if(!ehAdmin())return;
+    openModal(`${mHead('Salvar ponto de restauração')}
+      ${campo('Nome deste ponto (opcional)',`<input class="input" id="hs_rot" maxlength="60" placeholder="ex.: antes do balanço de estoque">`)}
+      <div class="small muted mb">Guarda uma foto de como o café está agora, para você poder voltar a este ponto depois.</div>
+      <div class="m-actions"><button class="btn soft" data-act="fechar-modal">Cancelar</button>
+      <button class="btn primary" data-act="hist-snapshot-ok">Salvar ponto</button></div>`);},
+  'hist-snapshot-ok':async()=>{if(!ehAdmin())return;const u=usuarioAtual();
+    const rotulo=($('#hs_rot')?.value||'').trim()||'ponto manual';
+    closeAllModals();
+    if(S.meta.sujo)await sincronizar(); // garante que o servidor tem o estado atual antes de fotografar
+    try{const r=await apiEstado({acao:'snapshot',rotulo,uid:u.id,hash:u.hash});
+      if(r.ok){toast('✓ Ponto de restauração salvo.');R.tmp.histLista=undefined;if(R.route==='historico')render();}
+      else toast(esc(r.erro||'não deu para salvar'),'warn');}
+    catch(e){toast('Falha: '+esc(e.message),'warn');}},
+  'hist-restaurar':(d)=>{if(!ehAdmin())return;
+    confirmar(`Restaurar o café para o ponto de <b>${esc(d.quando)}</b>? Tudo volta a como estava naquele momento, em TODOS os aparelhos. O estado atual fica guardado, então dá para desfazer depois.`,async()=>{
+      const u=usuarioAtual();closeAllModals();toast('Restaurando…');
+      try{const r=await apiEstado({acao:'restaurar',k:d.k,uid:u.id,hash:u.hash});
+        if(r.ok){
+          const p=await apiEstado({acao:'pull',uid:u.id,hash:u.hash});
+          if(p.ok){adotarRemoto(p.estado,p.v,false);R.tmp.histLista=undefined;
+            if(usuarioAtual())toast('✓ Café restaurado ao ponto de '+esc(d.quando)+'.');}
+        }else toast(esc(r.erro||'não deu para restaurar'),'warn');}
+      catch(e){toast('Falha: '+esc(e.message),'warn');}
+    },'Restaurar');},
   'perm-toggle':(d)=>{if(!ehAdmin())return;
     const arr=S.config.permissoes[d.papel]??=[];
     const i=arr.indexOf(d.rota);

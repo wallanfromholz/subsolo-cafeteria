@@ -8,3 +8,6 @@ package-lock.json
 .claude/
 .agents/
 skills-lock.json
+
+# macOS
+.DS_Store

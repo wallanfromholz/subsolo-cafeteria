@@ -18,8 +18,15 @@
  */
 const crypto = require('crypto');
 
-const K_V = 'subsolo:v';
-const K_ESTADO = 'subsolo:estado';
+const NS = process.env.SYNC_NS || 'subsolo';  // namespace das chaves (isola testes dos dados reais)
+const K_V = NS + ':v';
+const K_ESTADO = NS + ':estado';
+const HIST_IDX = NS + ':histidx';         // lista de metadados dos pontos, do mais novo ao mais antigo
+const HIST_PREFIX = NS + ':hist:';          // <NS>:hist:<em> = estado cifrado daquele ponto
+const MAX_AUTO = 60, MAX_MANUAL = 30;       // quantos pontos guardar
+const INTERVALO_AUTO = 10 * 60 * 1000;      // no máximo 1 ponto automático a cada 10 min
+/* mesmas coleções sincronizadas do cliente — usadas para re-carimbar e criar tumbas no rollback */
+const SYNC_COLS = ['categorias', 'insumos', 'receitas', 'produtos', 'clientes', 'pedidos', 'tarefas', 'lotesProntos', 'compras', 'perdas', 'cardapios', 'despesas', 'comandas', 'usuarios'];
 
 const redisUrl = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
 const redisToken = () => process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -79,6 +86,51 @@ async function gravarCAS(baseV, estado) {
   const res = await redis(['EVAL', LUA_CAS, '2', K_V, K_ESTADO, String(baseV), String(baseV + 1), pacote]);
   if (+res === -1) return { venceu: true };
   return { venceu: false, atual: await carregar() };
+}
+
+/* ---------- histórico de versões (pontos de restauração) ---------- */
+function resumoEstado(e) {
+  return {
+    pedidos: (e.pedidos || []).filter(p => !p.modelo).length,
+    clientes: (e.clientes || []).length,
+    produtos: (e.produtos || []).length,
+    insumos: (e.insumos || []).length,
+    comandas: (e.comandas || []).length,
+    usuarios: (e.usuarios || []).length
+  };
+}
+async function arquivar(estado, v, opts = {}) {
+  const manual = !!opts.manual, rotulo = String(opts.rotulo || '').slice(0, 80);
+  const em = Date.now();
+  if (!manual) { // throttle: só um ponto automático a cada 10 min (e ao virar o dia)
+    try {
+      const ult = await redis(['LINDEX', HIST_IDX, '0']);
+      if (ult) { const u = JSON.parse(ult); if (em - (u.em || 0) < INTERVALO_AUTO && new Date(em).toDateString() === new Date(u.em).toDateString()) return; }
+    } catch (e) {}
+  }
+  const k = String(em);
+  await redis(['SET', HIST_PREFIX + k, JSON.stringify({ em, v, dados: cifrar(JSON.stringify(estado)) })]);
+  await redis(['LPUSH', HIST_IDX, JSON.stringify({ k, em, v, manual, rotulo, resumo: resumoEstado(estado) })]);
+  // poda: mantém no máximo MAX_AUTO automáticos e MAX_MANUAL manuais
+  try {
+    const raw = await redis(['LRANGE', HIST_IDX, '0', '-1']);
+    const todos = (raw || []).map(s => { try { return JSON.parse(s); } catch (e) { return null; } }).filter(Boolean);
+    const manuais = todos.filter(t => t.manual), autos = todos.filter(t => !t.manual);
+    if (autos.length > MAX_AUTO || manuais.length > MAX_MANUAL) {
+      const manter = [...manuais.slice(0, MAX_MANUAL), ...autos.slice(0, MAX_AUTO)];
+      const manterK = new Set(manter.map(t => t.k));
+      for (const t of todos) if (!manterK.has(t.k)) { try { await redis(['DEL', HIST_PREFIX + t.k]); } catch (e) {} }
+      manter.sort((a, b) => b.em - a.em);
+      await redis(['DEL', HIST_IDX]);
+      if (manter.length) await redis(['RPUSH', HIST_IDX, ...manter.map(x => JSON.stringify(x))]);
+    }
+  } catch (e) {}
+}
+async function carregarSnapshot(k) {
+  const raw = await redis(['GET', HIST_PREFIX + String(k)]);
+  if (!raw) return null;
+  const snap = JSON.parse(raw);
+  return { em: snap.em, v: snap.v, estado: JSON.parse(decifrar(snap.dados)) };
 }
 
 /* autentica contra a lista de usuários de um estado (mesmo hash do app: sha256("salt::senha"))
@@ -209,6 +261,7 @@ module.exports = async (req, res) => {
         if (!g.atual) return responder(503, { ok: false, erro: 'Servidor ocupado — tente de novo.' });
         return responder(409, { ok: false, conflito: true, v: g.atual.v, estado: g.atual.estado });
       }
+      try { await arquivar(limpo, baseV + 1); } catch (e) {} // ponto de restauração (best-effort)
       return responder(200, { ok: true, v: baseV + 1 });
     }
     // bootstrap: servidor vazio — o estado enviado precisa ter admin ativo e o auth deve bater com ele
@@ -222,7 +275,56 @@ module.exports = async (req, res) => {
       if (!g.atual) return responder(503, { ok: false, erro: 'Servidor ocupado — tente de novo.' });
       return responder(409, { ok: false, conflito: true, v: g.atual.v, estado: g.atual.estado });
     }
+    try { await arquivar(estado, 1, { manual: true, rotulo: 'início do sistema' }); } catch (e) {}
     return responder(200, { ok: true, v: 1 });
+  }
+
+  if (acao === 'historico' || acao === 'snapshot' || acao === 'restaurar') {
+    if (!atual) return responder(404, { ok: false, erro: 'Ainda não há dados sincronizados.' });
+    const a = autenticar(atual.estado, body);
+    if (a.reAutenticar) return responder(401, { ok: false, reAutenticar: true, erro: 'Credencial desatualizada — entre de novo.' });
+    if (!a.u || a.u.papel !== 'admin') return responder(403, { ok: false, erro: 'Só administradores acessam o histórico.' });
+
+    if (acao === 'historico') {
+      let lista = [];
+      try { const raw = await redis(['LRANGE', HIST_IDX, '0', '-1']); lista = (raw || []).map(s => { try { return JSON.parse(s); } catch (e) { return null; } }).filter(Boolean); } catch (e) {}
+      return responder(200, { ok: true, versaoAtual: atual.v, historico: lista });
+    }
+
+    if (acao === 'snapshot') {
+      try { await arquivar(atual.estado, atual.v, { manual: true, rotulo: body.rotulo || 'ponto manual' }); }
+      catch (e) { return responder(502, { ok: false, erro: 'Falha ao guardar o ponto: ' + e.message }); }
+      return responder(200, { ok: true, v: atual.v });
+    }
+
+    // restaurar: volta o estado a um ponto anterior, propagando para todos os aparelhos
+    const snap = await carregarSnapshot(body.k);
+    if (!snap) return responder(404, { ok: false, erro: 'Esse ponto de restauração não existe mais.' });
+    // guarda o estado atual como ponto manual (para poder desfazer a restauração)
+    try { await arquivar(atual.estado, atual.v, { manual: true, rotulo: 'antes de restaurar ' + new Date(snap.em).toLocaleString('pt-BR') }); } catch (e) {}
+
+    const restaurado = snap.estado, agora = Date.now();
+    const tumbas = Array.isArray(restaurado.tumbas) ? restaurado.tumbas.slice() : [];
+    for (const c of SYNC_COLS) {
+      const idsOld = new Set((restaurado[c] || []).map(e => e && e.id).filter(Boolean));
+      for (const e of (restaurado[c] || [])) if (e && e.id) e.mEm = agora;                 // vence o merge
+      for (const e of (atual.estado[c] || [])) if (e && e.id && !idsOld.has(e.id)) tumbas.push({ c, id: e.id, em: agora }); // remove o que surgiu depois
+    }
+    restaurado.tumbas = tumbas;
+    if (restaurado.caixa && restaurado.caixa.dias) for (const d of Object.values(restaurado.caixa.dias)) if (d) d.mEm = agora;
+    if (restaurado.config) restaurado.config.mEm = agora;
+    // nunca deixa a pessoa que restaura sem acesso de administrador
+    restaurado.usuarios = restaurado.usuarios || [];
+    const eu = restaurado.usuarios.find(u => u.id === a.u.id);
+    if (eu) { eu.ativo = true; eu.pendente = false; eu.papel = 'admin'; eu.mEm = agora; }
+    else restaurado.usuarios.push(Object.assign({}, a.u, { ativo: true, pendente: false, papel: 'admin', mEm: agora }));
+
+    let g;
+    try { g = await gravarCAS(atual.v, restaurado); }
+    catch (e) { return responder(502, { ok: false, erro: 'Falha ao restaurar: ' + e.message }); }
+    if (!g.venceu) return responder(409, { ok: false, erro: 'Alguém salvou algo agora mesmo — abra o histórico de novo e tente outra vez.' });
+    try { await arquivar(restaurado, atual.v + 1, { manual: true, rotulo: 'restaurado de ' + new Date(snap.em).toLocaleString('pt-BR') }); } catch (e) {}
+    return responder(200, { ok: true, v: atual.v + 1 });
   }
 
   return responder(400, { ok: false, erro: 'Ação desconhecida.' });
