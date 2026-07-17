@@ -28,6 +28,14 @@ Variáveis necessárias (a integração Upstash cria as primeiras sozinha): `KV_
 
 **Backup:** com a sincronização ligada, o backup (Início → Backup) é uma **cópia de segurança** — não é mais o jeito de levar dados de um aparelho a outro. Restaurar um backup substitui os dados de **toda a equipe**.
 
+### Histórico e restauração (rollback)
+
+Em **Configurações → Backup → 🕘 Histórico e restauração** (só admin), você vê pontos de restauração do café ao longo do tempo e volta a qualquer um deles com um clique.
+
+- O servidor guarda um ponto automático conforme o café é usado (no máximo um a cada ~10 min) e você pode **salvar um ponto manual** antes de algo arriscado (ex.: um balanço de estoque).
+- **Restaurar** volta *tudo* a como estava naquele momento, em **todos os aparelhos** — e o estado atual vira um ponto novo, então dá para **desfazer** a restauração.
+- Guarda os últimos 60 pontos automáticos e 30 manuais.
+
 ## "Esqueci minha senha" por e-mail (Resend)
 
 O envio usa a função `/api/reset` + o serviço [Resend](https://resend.com). Para ativar:
