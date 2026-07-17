@@ -1,2 +1,10 @@
+# Vercel CLI
 .vercel
 .env*
+# dependências locais (as funções em api/ usam só módulos nativos do Node)
+node_modules
+package-lock.json
+# ferramentas de desenvolvimento (config local, não faz parte do app)
+.claude/
+.agents/
+skills-lock.json

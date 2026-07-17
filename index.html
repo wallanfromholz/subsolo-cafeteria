@@ -547,6 +547,7 @@ body.locked #app,body.locked .bnav,body.locked .fab{display:none!important}
 .auth .btn{width:100%;margin-top:6px}
 .auth-err{background:var(--verm-bg);color:var(--verm);border:1px solid #E3C0B8;border-radius:10px;padding:9px 12px;font-size:13px;margin-bottom:12px;text-align:center}
 .auth-ok{background:var(--verde-bg);color:var(--verde);border:1px solid #BAD4BA;border-radius:10px;padding:9px 12px;font-size:13px;margin-bottom:12px;text-align:center}
+.auth-info{background:var(--kraft);color:var(--ink-2);border:1px solid var(--line);border-radius:10px;padding:9px 12px;font-size:13px;margin-bottom:12px;text-align:center}
 .auth-link{text-align:center;margin-top:15px}
 .auth-link button{color:var(--bordo);font-size:12.5px;text-decoration:underline}
 .auth-code{font-family:var(--mono);font-size:24px;font-weight:700;letter-spacing:5px;text-align:center;background:var(--kraft);border:1.5px dashed var(--gold-deep);border-radius:12px;padding:16px;color:var(--bordo);margin:6px 0 14px}
@@ -619,6 +620,14 @@ const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 const clone=o=>JSON.parse(JSON.stringify(o));
+/* id estável entre aparelhos: mesma entidade lógica → mesmo id em qualquer aparelho.
+   Se o id base já existir (ex.: ciclo antigo já concluído), acrescenta um contador —
+   determinístico, então dois aparelhos chegam ao mesmo id em vez de duplicarem. */
+function idDeterminista(base,lista){
+  if(!lista.some(x=>x.id===base))return base;
+  for(let n=2;n<9999;n++){const id=base+'#'+n;if(!lista.some(x=>x.id===id))return id;}
+  return base+'#'+uid();
+}
 const arred=(v,d=2)=>Math.round((+v||0)*10**d)/10**d;
 const BRL=new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL',minimumFractionDigits:2,maximumFractionDigits:2});
 const m=v=>BRL.format(arred(+v||0,2));                       // R$ 10,00 sempre
@@ -661,10 +670,240 @@ function loadRaw(){
   try{const r=localStorage.getItem(SKEY);return r?JSON.parse(r):null}
   catch(e){storageOK=false;return memStore}
 }
-function persist(){
+function persistRaw(){
   S.meta.salvoEm=Date.now();
   try{localStorage.setItem(SKEY,JSON.stringify(S))}
   catch(e){storageOK=false;memStore=S}
+}
+
+/* =================== SINCRONIZAÇÃO ENTRE APARELHOS ===================
+   O estado inteiro vive também no servidor (/api/estado). Cada entidade ganha um
+   carimbo de modificação (mEm) calculado por diff a cada persist(); exclusões viram
+   "tumbas". A mescla une por id e vence o mais recente. Push com controle de versão
+   (CAS) + poll a cada 4s mantém os aparelhos convergindo. */
+const SYNC_COLS=['categorias','insumos','receitas','produtos','clientes','pedidos','tarefas','lotesProntos','compras','perdas','cardapios','despesas','comandas','usuarios'];
+const diaVazio=d=>!d||(d.abertura==null&&!(d.movs&&d.movs.length)&&!d.fechamento);
+/* o dia do caixa é mesclado com cuidado: as movimentações (dinheiro!) são unidas por id e
+   um dia vazio nunca apaga abertura/fechamento já registrados noutro aparelho */
+function mesclarDia(a,b){
+  if(diaVazio(a))return b; if(diaVazio(b))return a;
+  const novoA=(a.mEm||0)>=(b.mEm||0);
+  const out=novoA?Object.assign({},b,a):Object.assign({},a,b);
+  const m=new Map();
+  for(const x of (b.movs||[]))if(x&&x.id)m.set(x.id,x);
+  for(const x of (a.movs||[]))if(x&&x.id)m.set(x.id,x);
+  out.movs=[...m.values()].sort((x,y)=>String(x.hora||'').localeCompare(String(y.hora||'')));
+  if(a.abertura==null&&b.abertura!=null){out.abertura=b.abertura;out.abertoEm=b.abertoEm;}
+  else if(b.abertura==null&&a.abertura!=null){out.abertura=a.abertura;out.abertoEm=a.abertoEm;}
+  if(a.fechamento==null&&b.fechamento!=null)out.fechamento=b.fechamento;
+  else if(b.fechamento==null&&a.fechamento!=null)out.fechamento=a.fechamento;
+  out.mEm=Math.max(a.mEm||0,b.mEm||0);
+  return out;
+}
+/* duas pessoas podem abrir a MESMA mesa em aparelhos diferentes: em vez de deixar duas
+   comandas para a mesma mesa (uma vira fantasma), une os itens — o estoque já foi baixado
+   em cada aparelho, então as quantidades e as baixas (bxHora) somam. */
+function unificarComandas(lista){
+  const porMesa=new Map(), out=[];
+  for(const c of lista){
+    if(c.mesa==null){out.push(c);continue;}
+    const ex=porMesa.get(c.mesa);
+    if(!ex){porMesa.set(c.mesa,c);continue;}
+    const base=(ex.abertaEm||0)<=(c.abertaEm||0)?ex:c, outra=base===ex?c:ex;
+    for(const it of (outra.itens||[])){
+      const j=(base.itens||[]).find(x=>x.skuId===it.skuId);
+      if(j){j.qtd+=it.qtd;if(it.bxHora)j.bxHora=(j.bxHora||0)+it.bxHora;}
+      else (base.itens??=[]).push(it);
+    }
+    base.mEm=Math.max(ex.mEm||0,c.mEm||0);
+    porMesa.set(c.mesa,base);
+  }
+  return out.concat([...porMesa.values()]);
+}
+const SYNC={timer:null,pushT:null,emCurso:false,ultimo:0,erro:null,delta:0,off:false};
+let SNAP=null;
+/* relógio comum a todos os aparelhos: o servidor manda a hora dele e guardamos a diferença.
+   Sem isso, um aparelho com a hora errada faz suas edições vencerem (ou perderem) sempre. */
+const agoraSync=()=>Date.now()+(SYNC.delta||0);
+function snapshotar(){
+  SNAP={};
+  for(const c of SYNC_COLS){const m=new Map();for(const e of (S[c]||[]))if(e&&e.id)m.set(e.id,JSON.stringify(e));SNAP[c]=m;}
+  SNAP.__dias=new Map(Object.entries(S.caixa?.dias||{}).map(([k,v])=>[k,JSON.stringify(v)]));
+  SNAP.__config=JSON.stringify(S.config);
+}
+function carimbar(){ // devolve true se algo mudou desde o último snapshot
+  if(!SNAP){snapshotar();return false;}
+  const agora=agoraSync(); let mudou=false;
+  for(const c of SYNC_COLS){
+    const m=SNAP[c]||new Map(), vivos=new Set();
+    for(const e of (S[c]||[])){ if(!e||!e.id)continue; vivos.add(e.id);
+      if(m.get(e.id)!==JSON.stringify(e)){e.mEm=agora;mudou=true;} }
+    for(const [id] of m)if(!vivos.has(id)){S.tumbas.push({c,id,em:agora});mudou=true;}
+  }
+  for(const [k,v] of Object.entries(S.caixa?.dias||{})){
+    if(diaVazio(v))continue; // caixaDia() materializa o dia só de ler: esqueleto vazio não é edição
+    if(SNAP.__dias.get(k)!==JSON.stringify(v)){v.mEm=agora;mudou=true;}
+  }
+  if(JSON.stringify(S.config)!==SNAP.__config){S.config.mEm=agora;mudou=true;}
+  S.tumbas=S.tumbas.filter(t=>agora-t.em<30*864e5&&t.em<=agora+864e5);
+  if(mudou)snapshotar();
+  return mudou;
+}
+function persist(){
+  if(carimbar()){S.meta.sujo=true;S.meta.marca=(S.meta.marca||0)+1;}
+  persistRaw();
+  agendarPush();
+}
+function estadoParaEnvio(){
+  const c=Object.assign({},S);
+  c.meta={criadoEm:S.meta.criadoEm,salvoEm:S.meta.salvoEm}; // v/sujo/marca são locais deste aparelho
+  const dias={};
+  for(const [k,v] of Object.entries(S.caixa?.dias||{}))if(!diaVazio(v))dias[k]=v; // dias só de leitura não viajam
+  c.caixa={dias};
+  return c;
+}
+function mesclarEstados(local,remoto){ // une por entidade; vence a mais recente (mEm)
+  const out=remoto; let contribuiu=false; // "contribuiu" = o lado local tem algo que o servidor não tinha
+  const tumbasRem=new Set((remoto.tumbas||[]).map(t=>t.c+'|'+t.id+'|'+t.em));
+  const tumbas=[...(local.tumbas||[]),...(remoto.tumbas||[])];
+  const tKey=new Map();
+  for(const t of tumbas){const k=t.c+'|'+t.id;const ex=tKey.get(k);if(!ex||t.em>ex.em)tKey.set(k,t);}
+  for(const c of SYNC_COLS){
+    const mapa=new Map();
+    for(const e of (remoto[c]||[]))if(e&&e.id)mapa.set(e.id,e);
+    for(const e of (local[c]||[])){if(!e||!e.id)continue;const r=mapa.get(e.id);
+      if(!r||(e.mEm||0)>(r.mEm||0)){
+        if(!r||JSON.stringify(r)!==JSON.stringify(e))contribuiu=true;
+        mapa.set(e.id,e);
+      }}
+    for(const [id,e] of [...mapa]){const t=tKey.get(c+'|'+id);if(t&&t.em>=(e.mEm||0))mapa.delete(id);}
+    out[c]=[...mapa.values()];
+  }
+  out.comandas=unificarComandas(out.comandas||[]);
+  out.caixa=out.caixa&&out.caixa.dias?out.caixa:{dias:{}};
+  for(const [k,v] of Object.entries(local.caixa?.dias||{})){
+    if(diaVazio(v))continue;
+    const r=out.caixa.dias[k];
+    const m=mesclarDia(v,r);
+    if(JSON.stringify(r||null)!==JSON.stringify(m))contribuiu=true;
+    out.caixa.dias[k]=m;
+  }
+  if((local.config?.mEm||0)>(out.config?.mEm||0)){
+    if(JSON.stringify(out.config)!==JSON.stringify(local.config))contribuiu=true;
+    out.config=local.config;
+  }
+  for(const t of tKey.values())if(!tumbasRem.has(t.c+'|'+t.id+'|'+t.em))contribuiu=true;
+  out.tumbas=[...tKey.values()].filter(t=>Date.now()-t.em<30*864e5);
+  return {estado:out,contribuiu};
+}
+async function apiEstado(payload,ms=20000){
+  const ctl=typeof AbortController!=='undefined'?new AbortController():null;
+  const t=ctl?setTimeout(()=>ctl.abort(),ms):null;
+  let r;
+  try{ r=await fetch('/api/estado',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload),signal:ctl?ctl.signal:undefined}); }
+  catch(e){ throw new Error(e.name==='AbortError'?'o servidor demorou demais':'sem conexão com o servidor'); }
+  finally{ if(t)clearTimeout(t); }
+  let j=null;try{j=await r.json();}catch(e){}
+  if(!j)throw new Error('servidor de sincronização indisponível');
+  if(j.agora)SYNC.delta=j.agora-Date.now();                       // acerta o relógio pelo servidor
+  if(r.status===503&&/não configurada/i.test(j.erro||''))SYNC.off=true; // app publicado sem sync
+  else if(r.status!==503)SYNC.off=false;
+  return j;
+}
+function renderSeguro(){
+  const ae=document.activeElement;
+  const digitando=ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName);
+  if(digitando||document.querySelector('.modal-back')){R.tmp.renderPend=true;return;}
+  render();
+}
+function adotarRemoto(remoto,v,manterSujo){
+  const m=mesclarEstados(S,remoto);
+  m.estado.meta=Object.assign({},m.estado.meta,{v});
+  S=migrar(m.estado);
+  S.meta.v=v;
+  S.meta.sujo=manterSujo||m.contribuiu; // se o local contribuiu, devolve ao servidor na próxima volta
+  snapshotar();persistRaw();
+  const eu=usuarioAtual();
+  if(!eu||eu.ativo===false){UID=null;limparSessao();closeAllModals();mostrarLogin();toast('Seu acesso mudou. Entre novamente.','warn');return;}
+  renderSeguro();
+}
+async function sincronizar(){
+  if(SYNC.emCurso||!UID||!usuarioAtual())return;
+  if(SYNC.off&&Date.now()-SYNC.ultimo<60000)return; // sem sync configurado: só tenta de vez em quando
+  const u=usuarioAtual(), auth={uid:u.id,hash:u.hash};
+  SYNC.emCurso=true;
+  try{
+    if(S.meta.sujo){
+      const enviado=estadoParaEnvio(), baseV=S.meta.v||0;
+      const marca=S.meta.marca=(S.meta.marca||0)+1; // detecta edições feitas DURANTE o push
+      const r=await apiEstado(Object.assign({acao:'push',baseV,estado:enviado},auth));
+      if(r.ok){S.meta.v=r.v;if(S.meta.marca===marca)S.meta.sujo=false;SYNC.falhas=0;persistRaw();}
+      else if(r.conflito){adotarRemoto(r.estado,r.v,true);SYNC.falhas=0;}
+      else if(r.reAutenticar){ // a senha mudou noutro aparelho: sessão velha, pede login
+        UID=null;limparSessao();closeAllModals();mostrarLogin();
+        toast('Sua senha mudou em outro aparelho. Entre de novo.','warn');return;
+      }
+      else{
+        // o servidor recusou este envio (não é conflito): depois de algumas tentativas,
+        // baixa o que está lá e mescla, em vez de tentar o mesmo envio para sempre
+        SYNC.falhas=(SYNC.falhas||0)+1;
+        if(SYNC.falhas>=3){
+          const p=await apiEstado(Object.assign({acao:'pull'},auth));
+          if(p.ok){adotarRemoto(p.estado,p.v,false);SYNC.falhas=0;}
+        }
+        throw new Error(r.erro||'falha ao enviar');
+      }
+    }else{
+      const st=await apiEstado({acao:'status'});
+      if(!st.ok)throw new Error(st.erro||'falha no status');
+      if(st.temEstado&&st.v!==(S.meta.v||0)){ // != e não > : servidor reiniciado/restaurado também converge
+        if(document.querySelector('.modal-back')){SYNC.emCurso=false;return;} // não troca os dados sob um modal aberto
+        const p=await apiEstado(Object.assign({acao:'pull'},auth));
+        if(p.ok)adotarRemoto(p.estado,p.v,false);
+        else if(p.reAutenticar){UID=null;limparSessao();closeAllModals();mostrarLogin();
+          toast('Sua senha mudou em outro aparelho. Entre de novo.','warn');return;}
+        else throw new Error(p.erro||'falha ao baixar');
+      }else if(!st.temEstado&&S.usuarios.length){
+        S.meta.sujo=true; // servidor vazio: este aparelho semeia na próxima volta
+      }
+    }
+    SYNC.erro=null;
+  }catch(e){SYNC.erro=e.message;}
+  SYNC.ultimo=Date.now(); // marca a tentativa (mesmo falha) para não martelar em aba oculta
+  SYNC.emCurso=false;
+  atualizarSyncUI();
+  if(R.tmp.renderPend&&!document.querySelector('.modal-back')){
+    const ae=document.activeElement;
+    if(!(ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName))){R.tmp.renderPend=false;render();}
+  }
+}
+function agendarPush(){
+  clearTimeout(SYNC.pushT);
+  SYNC.pushT=setTimeout(()=>sincronizar(),1200);
+}
+function iniciarSync(){
+  clearInterval(SYNC.timer);
+  SYNC.timer=setInterval(()=>{
+    if(document.hidden&&Date.now()-SYNC.ultimo<20000)return;
+    sincronizar();
+  },4000);
+  if(!SYNC.ouvindo){ // ao voltar para a aba/reconectar, atualiza na hora (o navegador freia o timer em segundo plano)
+    SYNC.ouvindo=true;
+    document.addEventListener('visibilitychange',()=>{if(!document.hidden)sincronizar();});
+    window.addEventListener('focus',()=>sincronizar());
+    window.addEventListener('online',()=>sincronizar());
+  }
+  sincronizar();
+}
+function atualizarSyncUI(){
+  const el=$('#sideSalvo');if(!el)return;
+  if(!storageOK){el.textContent='⚠ salvando só em memória';return;}
+  if(SYNC.off)el.textContent='✓ salvo neste aparelho';   // publicado sem sincronização: comportamento antigo
+  else if(SYNC.erro)el.textContent='⚠ sem conexão — salvando neste aparelho';
+  else if(S.meta.sujo)el.textContent='☁️ sincronizando…';
+  else if(SYNC.ultimo)el.textContent='☁️ sincronizado '+new Date(SYNC.ultimo).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  else el.textContent='✓ salvo neste aparelho';
 }
 
 /* =================== ESTADO v2 =================== */
@@ -704,7 +943,7 @@ function estadoVazio(){
     },
     categorias:[],insumos:[],receitas:[],produtos:[],clientes:[],pedidos:[],
     tarefas:[],lotesProntos:[],compras:[],perdas:[],cardapios:[],despesas:[],
-    comandas:[], caixa:{dias:{}}, usuarios:[], auth:null
+    comandas:[], caixa:{dias:{}}, usuarios:[], tumbas:[], auth:null
   };
 }
 function migrar(st){
@@ -721,6 +960,8 @@ function migrar(st){
   for(const k of Object.keys(base))if(st[k]===undefined)st[k]=base[k];
   if(!st.caixa||!st.caixa.dias)st.caixa={dias:{}};
   if(!Array.isArray(st.usuarios))st.usuarios=[];
+  if(!Array.isArray(st.tumbas))st.tumbas=[];
+  for(const c of SYNC_COLS)for(const e of (st[c]||[]))if(e&&!e.id)e.id='m_'+uid();
   /* acesso único (v2) → equipe multi-usuário: o login antigo vira o administrador */
   if(st.auth&&st.auth.hash&&!st.usuarios.length){
     st.usuarios.push({id:'u_'+uid(),nome:st.auth.user,user:st.auth.user,email:'',papel:'admin',
@@ -1083,8 +1324,12 @@ function baixarPronto(skuId,qtdV){ let falta=qtdV;
   S.lotesProntos=S.lotesProntos.filter(l=>l.qtd>0.0001);
   return falta;
 }
-function entradaPronto(skuId,q,validadeDias){
-  S.lotesProntos.push({id:uid(),skuId,qtd:q,producao:hISO(),validade:addDiasISO(hISO(),Math.max(0,validadeDias||1))});
+function entradaPronto(skuId,q,validadeDias,id){
+  // id opcional e estável (ex.: vindo da tarefa de produção) evita lote duplicado quando
+  // a mesma produção é concluída em dois aparelhos
+  const novo={id:id||uid(),skuId,qtd:q,producao:hISO(),validade:addDiasISO(hISO(),Math.max(0,validadeDias||1))};
+  const ex=id?S.lotesProntos.find(l=>l.id===id):null;
+  if(ex)Object.assign(ex,novo); else S.lotesProntos.push(novo);
 }
 function explodirInsumos(rid,mult,acc={},path=[]){
   const r=receitaById(rid); if(!r||path.includes(rid))return acc;
@@ -1168,7 +1413,7 @@ function replanejar(){
   S.tarefas=S.tarefas.filter(t=>!(t.auto&&t.tipo==='producao'&&!t.concluida&&t.fase!=='produzindo'&&!alvoK.has(chave(t))));
   for(const g of alvo){
     let t=S.tarefas.find(t=>t.auto&&t.tipo==='producao'&&!t.concluida&&t.fase!=='produzindo'&&chave(t)===g.rid+'|'+g.data);
-    if(!t){t={id:uid(),auto:true,tipo:'producao',concluida:false,fase:'fila'};S.tarefas.push(t);}
+    if(!t){t={id:idDeterminista('ta_'+g.rid+'_'+g.data,S.tarefas),auto:true,tipo:'producao',concluida:false,fase:'fila'};S.tarefas.push(t);}
     Object.assign(t,{receitaId:g.rid,data:g.data,lotes:g.lotes,pedidoIds:g.peds,
       titulo:`Produzir ${g.lotes}× ${receitaById(g.rid).nome}`});
   }
@@ -1191,7 +1436,7 @@ function replanejar(){
   S.compras=S.compras.filter(c=>c.comprado||c.origem!=='auto'||faltas[c.insumoId]);
   for(const iid in faltas){
     let c=S.compras.find(c=>c.origem==='auto'&&!c.comprado&&c.insumoId===iid);
-    if(!c){c={id:uid(),origem:'auto',insumoId:iid,comprado:false};S.compras.push(c);}
+    if(!c){c={id:idDeterminista('ca_'+iid,S.compras),origem:'auto',insumoId:iid,comprado:false};S.compras.push(c);}
     c.qtdUso=faltas[iid]; c.motivo=motivos[iid];
   }
 }
@@ -1205,7 +1450,7 @@ function gerarFixos(){
       const d=addDiasISO(H,delta+7*w);
       if(mo.geradas.includes(d))continue;
       if(S.pedidos.some(p=>p.fixoDe===mo.id&&p.dataEntrega===d))continue;
-      S.pedidos.push({id:uid(),fixoDe:mo.id,clienteId:mo.clienteId,canal:mo.canal,forma:mo.forma,
+      S.pedidos.push({id:'fx_'+mo.id+'_'+d,fixoDe:mo.id,clienteId:mo.clienteId,canal:mo.canal,forma:mo.forma,
         itens:clone(mo.itens),dataEntrega:d,hora:mo.hora,status:'Confirmado',
         pagamento:mo.pagamento||'a_receber',obs:mo.obs||'',criadoEm:Date.now(),demo:mo.demo});
       mo.geradas.push(d);
@@ -1215,12 +1460,13 @@ function gerarFixos(){
 }
 function concluirProducaoCore(t){
   const r=receitaById(t.receitaId); if(!r)return null;
+  if(t.concluida)return null; // já concluída (ex.: pelo outro aparelho): não baixa nem dá entrada de novo
   const need=explodirInsumos(r.id,t.lotes||1);
   const zerados=baixarInsumos(need);
   const entradas=[];
   for(const s of skusDaReceita(r.id)){
     const q=(s.unidadesPorLote||1)*(t.lotes||1);
-    entradaPronto(s.id,q,s.validadeDias);
+    entradaPronto(s.id,q,s.validadeDias,'lp_'+t.id+'_'+s.id); // id estável: mesma produção → mesmo lote
     entradas.push({sku:s,q});
   }
   t.concluida=true;t.concluidaEm=Date.now();t.fase='pronto';
@@ -1438,11 +1684,15 @@ function exportarJSON(){
   document.body.appendChild(a);a.click();a.remove();
   setTimeout(()=>URL.revokeObjectURL(a.href),4000);
   S.config.ultimoBackup=Date.now();persist();render();
-  toast('Backup exportado. Envie o arquivo para o outro aparelho para manter os dois em dia.');
+  toast(SYNC.off
+    ?'Backup exportado. Envie o arquivo para o outro aparelho para manter os dois em dia.'
+    :'Backup exportado — guarde em lugar seguro. <b>Os aparelhos já se sincronizam sozinhos</b>: o backup serve só para recuperar de uma perda.');
 }
 function importarJSON(obj){
   if(!obj||!obj.schemaVersion||!Array.isArray(obj.insumos)){toast('Arquivo inválido: não parece um backup do Subsolo Café.','warn');return;}
-  confirmar('Substituir TODOS os dados deste aparelho (inclusive equipe e acessos) pelo backup? Não dá para desfazer.',()=>{
+  confirmar(SYNC.off
+    ?'Substituir TODOS os dados deste aparelho (inclusive equipe e acessos) pelo backup? Não dá para desfazer.'
+    :'⚠️ Este café sincroniza entre os aparelhos. Restaurar o backup vai substituir os dados de TODA a equipe, em todos os aparelhos — inclusive lançamentos feitos hoje por outras pessoas. Só faça isso para recuperar de uma perda. Não dá para desfazer.',()=>{
     const usersAntes=S&&Array.isArray(S.usuarios)&&S.usuarios.length?S.usuarios:null;
     S=migrar(obj);
     if(!S.usuarios.length&&usersAntes)S.usuarios=usersAntes; // não remove a trava ao importar backup sem equipe
@@ -1570,7 +1820,7 @@ function render(){
   $('#backupDot').classList.toggle('hide',!(ehAdmin()&&backupVelho()));
   $('#comprasDot').classList.toggle('hide',!S.compras.some(c=>!c.comprado));
   const cd=caixaDia(hISO()); $('#caixaDot').classList.toggle('hide',!(cd.abertura==null&&!cd.fechamento));
-  const sf=$('#sideSalvo'); if(sf)sf.textContent=storageOK?'✓ salvo automaticamente':'⚠ salvando só em memória';
+  atualizarSyncUI();
   if(def.after)def.after(R.params);
 }
 function openModal(html,wide){
@@ -1803,7 +2053,7 @@ function dashOp(){
       </div>`).join('')}
   </div>`:''}
   ${als.length?`<div class="card"><h3>Alertas</h3>${als.map(a=>`<button class="al ${a.cls||''}" ${a.act||''}><span class="a-i">${a.i}</span><span class="a-m">${a.m}</span><span>›</span></button>`).join('')}</div>`:''}
-  ${ehAdmin()&&backupVelho()?`<button class="al warn" data-act="exportar"><span class="a-i">🛟</span><span class="a-m">Seu último backup tem mais de 7 dias (ou nunca foi feito). Exporte e envie para o outro aparelho.</span><span>›</span></button>`:''}`;
+  ${ehAdmin()&&backupVelho()?`<button class="al warn" data-act="exportar"><span class="a-i">🛟</span><span class="a-m">Seu último backup tem mais de 7 dias (ou nunca foi feito). ${SYNC.off?'Exporte e envie para o outro aparelho.':'Guarde uma cópia de segurança.'}</span><span>›</span></button>`:''}`;
 }
 function dashFin(){
   const mes=hISO().slice(0,7);
@@ -3181,10 +3431,12 @@ ROUTES.config={titulo:()=>'Configurações',html(){
   return `
   <div class="grid2">
     <div class="card"><h3>🛟 Backup e sincronização</h3>
-      <div class="small muted mb">Um arquivo é tudo. Exporte e envie para o outro aparelho para manter os dois em dia. ${storageOK?'':'<b>⚠ Este navegador não está salvando sozinho — exporte com frequência.</b>'}</div>
+      <div class="small muted mb">${SYNC.off
+        ?'Um arquivo é tudo. Exporte e envie para o outro aparelho para manter os dois em dia.'
+        :'<b>☁️ Os aparelhos se sincronizam sozinhos</b> — quem entrar com o próprio acesso vê tudo em dia, sem trocar arquivo. O backup serve como cópia de segurança para recuperar de uma perda.'} ${storageOK?'':'<b>⚠ Este navegador não está salvando sozinho — exporte com frequência.</b>'}</div>
       <div class="rowflex"><button class="btn gold" data-act="exportar">⬇️ Exportar backup</button>
       <label class="btn soft" style="cursor:pointer">⬆️ Importar backup<input type="file" accept="application/json,.json" style="display:none" data-chg="importar-arquivo"></label></div>
-      <div class="tiny muted mt">Último backup: ${c.ultimoBackup?fData(dISO(new Date(c.ultimoBackup)))+' às '+new Date(c.ultimoBackup).toTimeString().slice(0,5):'nunca'}</div>
+      <div class="tiny muted mt">Último backup: ${c.ultimoBackup?fData(dISO(new Date(c.ultimoBackup)))+' às '+new Date(c.ultimoBackup).toTimeString().slice(0,5):'nunca'}${SYNC.off?'':' · Restaurar um backup substitui os dados de <b>toda a equipe</b>.'}</div>
     </div>
     <div class="card"><h3>🛎️ Balcão</h3>
       ${campo('Como o balcão funciona',`<div class="seg" id="cf_modo">
@@ -3756,11 +4008,35 @@ const ACTIONS={
   'auth-login':async()=>{const login=($('#au_user')?.value||'').trim().toLowerCase(),pass=$('#au_pass')?.value||'';
     if(!login||!pass){erroAuth('Preencha usuário e senha.');return;}
     const u=S.usuarios.find(x=>String(x.user).toLowerCase()===login||(x.email&&String(x.email).toLowerCase()===login));
-    if(u&&u.ativo===false){erroAuth(u.pendente?'Sua conta ainda não foi aprovada. Peça para um administrador liberar em Equipe & Acessos.':'Este acesso foi desativado. Fale com o administrador.');return;}
-    const h=u?await hashSenha(pass,u.salt):null;
-    if(u&&h===u.hash){UID=u.id;salvarSessao();bootApp();toast(`Bem-vindo, ${esc(u.nome.split(' ')[0])}! ☕`);}
-    else{erroAuth('Usuário ou senha incorretos.');const p=$('#au_pass');if(p){p.value='';p.focus();}}},
+    // acesso local válido: entra direto
+    if(u&&u.ativo!==false&&await hashSenha(pass,u.salt)===u.hash){
+      UID=u.id;salvarSessao();bootApp();toast(`Bem-vindo, ${esc(u.nome.split(' ')[0])}! ☕`);return;}
+    // não existe aqui, está pendente/desativado ou a senha mudou noutro aparelho → confere no servidor
+    infoAuth('Conferindo seu acesso no servidor…');
+    try{
+      const p=await apiEstado({acao:'pull',user:login,pass});
+      if(p.ok){
+        const m=S.usuarios.length?mesclarEstados(S,p.estado):{estado:p.estado,contribuiu:false};
+        m.estado.meta=Object.assign({},m.estado.meta,{v:p.v});
+        S=migrar(m.estado);S.meta.v=p.v;S.meta.sujo=!!m.contribuiu;
+        snapshotar();persistRaw();
+        const eu=S.usuarios.find(x=>x.id===p.uid);
+        if(eu&&eu.ativo!==false){UID=eu.id;salvarSessao();bootApp();toast(`Bem-vindo, ${esc(eu.nome.split(' ')[0])}! ☕`);return;}
+      }
+    }catch(e){}
+    // servidor não liberou: explica com o que sabemos localmente
+    if(u&&u.ativo===false)erroAuth(u.pendente?'Sua conta ainda não foi aprovada. Peça para um administrador liberar em Equipe & Acessos.':'Este acesso foi desativado. Fale com o administrador.');
+    else erroAuth('Usuário ou senha incorretos.');
+    const p2=$('#au_pass');if(p2){p2.value='';p2.focus();}},
   'auth-criar-conta':()=>mostrarCriarConta(),
+  'auth-retentar':async(d,el)=>{el.disabled=true;el.textContent='Conferindo…';
+    let st=null; try{ st=await apiEstado({acao:'status'},8000); }catch(e){}
+    if(st&&st.ok&&st.temEstado){mostrarLogin();return;}
+    if(st&&st.ok){mostrarSetup();return;}
+    el.disabled=false;el.textContent='🔄 Tentar de novo';
+    erroAuth('Ainda sem resposta do servidor. Verifique a internet.');},
+  'auth-forcar-setup':()=>confirmar('Criar um sistema NOVO e vazio só neste aparelho? Se o café já existe no servidor, isso cria uma base separada que não conversa com a dos outros. Só faça isso se for realmente a primeira instalação.',
+    ()=>{closeAllModals();mostrarSetup();},'Criar sistema novo'),
   'auth-signup':async()=>{const nome=($('#sc_nome')?.value||'').trim(),email=($('#sc_email')?.value||'').trim(),
       user=($('#sc_user')?.value||'').trim(),p1=$('#sc_pass')?.value||'',p2=$('#sc_pass2')?.value||'';
     if(!nome)return erroAuth('Diga seu nome.');
@@ -3771,9 +4047,20 @@ const ACTIONS={
     if(p1!==p2)return erroAuth('As senhas não são iguais.');
     const salt=novoSalt(),hash=await hashSenha(p1,salt);
     const rec=novoCodigoRec(),recSalt=novoSalt(),recHash=await hashSenha(rec,recSalt);
-    S.usuarios.push({id:'u_'+uid(),nome,user,email,papel:'garcom',salt,hash,recSalt,recHash,
-      ativo:false,pendente:true,criadoEm:Date.now()});
-    persist();mostrarCodigoRecSignup(rec);},
+    const novo={id:'u_'+uid(),nome,user,email,papel:'garcom',salt,hash,recSalt,recHash,
+      ativo:false,pendente:true,criadoEm:Date.now()};
+    // registra no servidor (é lá que o admin aprova). Sem servidor, guarda só neste aparelho.
+    let noServidor=false;
+    try{
+      const r=await apiEstado({acao:'signup',usuario:novo});
+      if(r.ok){novo.id=r.uid;noServidor=true;}                       // adota o id do servidor
+      else if(r.erro&&!/Ainda não há sistema/.test(r.erro))return erroAuth(r.erro);
+    }catch(e){
+      return erroAuth('Sem conexão com o servidor agora. Tente de novo em instantes.');
+    }
+    S.usuarios.push(novo);
+    if(noServidor){snapshotar();persistRaw();}else persist();
+    mostrarCodigoRecSignup(rec);},
   'auth-signup-ok':()=>{mostrarLogin();setTimeout(()=>okAuth('<b>Conta criada!</b> Agora peça para um administrador aprovar seu acesso em Equipe & Acessos.'),80);},
   'auth-setup':async()=>{const nome=($('#su_nome')?.value||'').trim(),email=($('#su_email')?.value||'').trim(),
       user=($('#su_user')?.value||'').trim(),p1=$('#su_pass')?.value||'',p2=$('#su_pass2')?.value||'';
@@ -4039,6 +4326,7 @@ function mostrarLogin(){
   setTimeout(()=>$('#au_user')?.focus(),60);
 }
 function okAuth(msg){const e=$('#auth_err');if(e)e.innerHTML=`<div class="auth-ok">${msg}</div>`;}
+function infoAuth(msg){const e=$('#auth_err');if(e)e.innerHTML=`<div class="auth-info">${esc(msg)}</div>`;}
 function mostrarCriarConta(){
   telaAuth(`<div class="auth-h">Criar conta</div><div class="auth-sub">Peça depois para um administrador <b>aprovar seu acesso</b> em Equipe & Acessos — só então você consegue entrar.</div>
     <div id="auth_err"></div>
@@ -4050,6 +4338,13 @@ function mostrarCriarConta(){
     <button class="btn primary lg" data-act="auth-signup">Criar conta</button>
     <div class="auth-link"><button data-act="auth-voltar-login">Voltar</button></div>`);
   setTimeout(()=>$('#sc_nome')?.focus(),60);
+}
+function mostrarSemServidor(){
+  telaAuth(`<div class="auth-h">Sem conexão com o servidor</div>
+    <div class="auth-sub">Este aparelho ainda não tem os dados do café e não consegui falar com o servidor agora. Confira a internet e tente de novo — assim evitamos criar um segundo sistema separado por engano.</div>
+    <div id="auth_err"></div>
+    <button class="btn primary lg" data-act="auth-retentar">🔄 Tentar de novo</button>
+    <div class="auth-link"><button data-act="auth-forcar-setup">Ainda assim, criar um sistema novo neste aparelho</button></div>`);
 }
 function mostrarCodigoRecSignup(codigo){
   telaAuth(`<div class="auth-h">Guarde seu código de recuperação</div>
@@ -4122,21 +4417,31 @@ function bootApp(){
   $('#authGate').innerHTML='';
   if(!podeVer(R.route)){R.route=rotaInicial();R.params={};}
   render();
+  iniciarSync();
 }
-function init(){
+async function init(){
   const raw=loadRaw();
   S=raw?migrar(raw):seed();
+  snapshotar();
   // custo das perdas demo (precisa dos produtos já carregados)
   for(const p of S.perdas)if(p.custo===0&&p.demo){const s=p.tipo==='insumo'?insumoById(p.refId):skuById(p.refId);
     if(s)p.custo=arred(p.qtd*(p.tipo==='insumo'?custoUso(s):custoDiretoSKU(s)),2);}
   // portão de acesso
-  if(!S.usuarios.length){mostrarSetup();return;}
+  if(!S.usuarios.length){
+    // aparelho novo: se o café já existe no servidor, entra por login (não cria outro sistema)
+    let st=null;
+    try{ st=await apiEstado({acao:'status'},8000); }catch(e){}
+    if(st&&st.ok&&st.temEstado){mostrarLogin();return;}
+    if(st&&st.ok){mostrarSetup();return;}          // servidor respondeu: realmente não há sistema
+    mostrarSemServidor();return;                    // não falamos com o servidor: não criar café paralelo
+  }
   if(sessaoValida()){bootApp();return;}
   mostrarLogin();
 }
 // expõe engines para testes
 window.__app={get S(){return S},set S(v){S=v},get UID(){return UID},set UID(v){UID=v},
   podeVer,rotaInicial,usuarioAtual,ehAdmin,adminsAtivos,PAPEIS,
+  sincronizar,mesclarEstados,apiEstado,SYNC,snapshotar,carimbar,persist,
   migrar,seed,estadoVazio,bootApp,mostrarLogin,mostrarSetup,hashSenha,
   precoDe,metric,mcSKU,custoDiretoSKU,custoIngSKU,custoUso,custoLoteR,
   impostoInfo,impostoPct,rbt12Auto,deducoes,precoAlvo,matrizCat,classeDe,
