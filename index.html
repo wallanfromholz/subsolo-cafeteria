@@ -546,6 +546,7 @@ body.locked #app,body.locked .bnav,body.locked .fab{display:none!important}
 .auth .input{min-height:46px;font-size:15px}
 .auth .btn{width:100%;margin-top:6px}
 .auth-err{background:var(--verm-bg);color:var(--verm);border:1px solid #E3C0B8;border-radius:10px;padding:9px 12px;font-size:13px;margin-bottom:12px;text-align:center}
+.auth-ok{background:var(--verde-bg);color:var(--verde);border:1px solid #BAD4BA;border-radius:10px;padding:9px 12px;font-size:13px;margin-bottom:12px;text-align:center}
 .auth-link{text-align:center;margin-top:15px}
 .auth-link button{color:var(--bordo);font-size:12.5px;text-decoration:underline}
 .auth-code{font-family:var(--mono);font-size:24px;font-weight:700;letter-spacing:5px;text-align:center;background:var(--kraft);border:1.5px dashed var(--gold-deep);border-radius:12px;padding:16px;color:var(--bordo);margin:6px 0 14px}
@@ -1535,6 +1536,7 @@ const MENU=[
   ['SISTEMA',[['equipe','🔐','Equipe & Acessos'],['config','⚙️','Configurações']]]
 ];
 function navBadge(r){
+  if(r==='equipe'){const n=S.usuarios.filter(u=>u.pendente&&u.ativo===false).length;return n?`<span class="bd">${n}</span>`:'';}
   if(r==='compras'){const n=S.compras.filter(c=>!c.comprado).length;return n?`<span class="bd">${n}</span>`:'';}
   if(r==='pedidos'){const n=S.pedidos.filter(p=>!p.modelo&&p.canal==='encomenda'&&!['Entregue','Cancelado'].includes(p.status)&&p.dataEntrega<=hISO()).length;return n?`<span class="bd">${n}</span>`:'';}
   if(r==='balcao'){const n=S.comandas.length;return n?`<span class="bd">${n}</span>`:'';}
@@ -1711,6 +1713,10 @@ function statusCaixaHoje(){
 }
 function alertasOp(){
   const A=[];const H=hISO();
+  if(ehAdmin()){
+    const pendUsr=S.usuarios.filter(u=>u.pendente&&u.ativo===false);
+    if(pendUsr.length)A.push({i:'🔐',cls:'warn',m:`<b>${pendUsr.length} conta(s) aguardando aprovação</b>: ${pendUsr.slice(0,3).map(u=>esc(u.nome.split(' ')[0])).join(', ')}${pendUsr.length>3?'…':''}`,act:`data-act="ir" data-route="equipe"`});
+  }
   if(podeVer('estoque')){
     const venc=S.lotesProntos.filter(l=>l.qtd>0&&diffDias(l.validade,H)<=3);
     for(const l of venc.slice(0,4)){const s=skuById(l.skuId);const d=diffDias(l.validade,H);
@@ -3270,19 +3276,20 @@ ROUTES.config={titulo:()=>'Configurações',html(){
 ROUTES.equipe={titulo:()=>'Equipe & Acessos',html(){
   if(!ehAdmin())return vazio('Só para administradores','Peça a um administrador para gerenciar a equipe.');
   const eu=usuarioAtual();
-  const linhas=[...S.usuarios].sort((a,b)=>(a.papel==='admin'?0:1)-(b.papel==='admin'?0:1)||a.nome.localeCompare(b.nome)).map(u=>{
-    const inativo=u.ativo===false, souEu=u.id===eu?.id;
-    return `<div class="eq-row ${inativo?'off':''}">
+  const linhas=[...S.usuarios].sort((a,b)=>(a.pendente&&a.ativo===false?0:1)-(b.pendente&&b.ativo===false?0:1)||(a.papel==='admin'?0:1)-(b.papel==='admin'?0:1)||a.nome.localeCompare(b.nome)).map(u=>{
+    const inativo=u.ativo===false, pend=!!u.pendente&&inativo, souEu=u.id===eu?.id;
+    return `<div class="eq-row ${inativo&&!pend?'off':''}" ${pend?'style="background:var(--amarelo-bg);border-radius:10px;padding:10px"':''}>
       <div class="eq-av">${esc((u.nome||'?')[0].toUpperCase())}</div>
       <div class="i-main">
-        <div class="i-t">${esc(u.nome)} <span class="badge ${PAPEL_BADGE[u.papel]||'b-cream'}">${PAPEIS[u.papel]||esc(u.papel)}</span>${souEu?' <span class="badge b-cream">você</span>':''}${inativo?' <span class="badge b-red">inativo</span>':''}</div>
+        <div class="i-t">${esc(u.nome)} <span class="badge ${PAPEL_BADGE[u.papel]||'b-cream'}">${PAPEIS[u.papel]||esc(u.papel)}</span>${souEu?' <span class="badge b-cream">você</span>':''}${pend?' <span class="badge b-gold">aguardando aprovação</span>':inativo?' <span class="badge b-red">inativo</span>':''}</div>
         <div class="i-s">@${esc(u.user)}${u.email?' · 📧 '+esc(u.email):' · <span style="color:var(--amarelo)">sem e-mail (não recebe reset)</span>'}</div>
       </div>
       <div class="rowflex nowrap" style="gap:5px">
+        ${pend?`<button class="btn sm gold" data-act="adm-aprovar" data-id="${u.id}">✓ Aprovar</button>`:''}
         <button class="btn sm soft" data-act="form-usuario" data-id="${u.id}">✏️ Editar</button>
         <button class="btn sm soft" data-act="adm-reset-senha" data-id="${u.id}">🔑 Senha</button>
         <button class="btn sm soft" data-act="adm-novo-codigo" data-id="${u.id}">🎟️ Código</button>
-        ${souEu?'':`<button class="btn sm ${inativo?'gold':'ghost'}" data-act="adm-ativo" data-id="${u.id}">${inativo?'▶ Reativar':'⏸ Desativar'}</button>
+        ${souEu?'':`${pend?'':`<button class="btn sm ${inativo?'gold':'ghost'}" data-act="adm-ativo" data-id="${u.id}">${inativo?'▶ Reativar':'⏸ Desativar'}</button>`}
         <button class="btn icon danger" data-act="adm-excluir" data-id="${u.id}" title="Excluir acesso">🗑</button>`}
       </div>
     </div>`;}).join('');
@@ -3749,10 +3756,25 @@ const ACTIONS={
   'auth-login':async()=>{const login=($('#au_user')?.value||'').trim().toLowerCase(),pass=$('#au_pass')?.value||'';
     if(!login||!pass){erroAuth('Preencha usuário e senha.');return;}
     const u=S.usuarios.find(x=>String(x.user).toLowerCase()===login||(x.email&&String(x.email).toLowerCase()===login));
-    if(u&&u.ativo===false){erroAuth('Este acesso foi desativado. Fale com o administrador.');return;}
+    if(u&&u.ativo===false){erroAuth(u.pendente?'Sua conta ainda não foi aprovada. Peça para um administrador liberar em Equipe & Acessos.':'Este acesso foi desativado. Fale com o administrador.');return;}
     const h=u?await hashSenha(pass,u.salt):null;
     if(u&&h===u.hash){UID=u.id;salvarSessao();bootApp();toast(`Bem-vindo, ${esc(u.nome.split(' ')[0])}! ☕`);}
     else{erroAuth('Usuário ou senha incorretos.');const p=$('#au_pass');if(p){p.value='';p.focus();}}},
+  'auth-criar-conta':()=>mostrarCriarConta(),
+  'auth-signup':async()=>{const nome=($('#sc_nome')?.value||'').trim(),email=($('#sc_email')?.value||'').trim(),
+      user=($('#sc_user')?.value||'').trim(),p1=$('#sc_pass')?.value||'',p2=$('#sc_pass2')?.value||'';
+    if(!nome)return erroAuth('Diga seu nome.');
+    if(!user)return erroAuth('Escolha um nome de usuário.');
+    if(email&&!/^\S+@\S+\.\S+$/.test(email))return erroAuth('Esse e-mail não parece válido.');
+    if(loginColide(null,user,email))return erroAuth('Esse usuário ou e-mail já pertence a alguém da equipe.');
+    if(p1.length<4)return erroAuth('A senha precisa de ao menos 4 caracteres.');
+    if(p1!==p2)return erroAuth('As senhas não são iguais.');
+    const salt=novoSalt(),hash=await hashSenha(p1,salt);
+    const rec=novoCodigoRec(),recSalt=novoSalt(),recHash=await hashSenha(rec,recSalt);
+    S.usuarios.push({id:'u_'+uid(),nome,user,email,papel:'garcom',salt,hash,recSalt,recHash,
+      ativo:false,pendente:true,criadoEm:Date.now()});
+    persist();mostrarCodigoRecSignup(rec);},
+  'auth-signup-ok':()=>{mostrarLogin();setTimeout(()=>okAuth('<b>Conta criada!</b> Agora peça para um administrador aprovar seu acesso em Equipe & Acessos.'),80);},
   'auth-setup':async()=>{const nome=($('#su_nome')?.value||'').trim(),email=($('#su_email')?.value||'').trim(),
       user=($('#su_user')?.value||'').trim(),p1=$('#su_pass')?.value||'',p2=$('#su_pass2')?.value||'';
     if(!nome)return erroAuth('Diga seu nome.');
@@ -3873,8 +3895,11 @@ const ACTIONS={
       persist();modalCodigoRec(u.nome,rec);},'Gerar código');},
   'adm-ativo':(d)=>{if(!ehAdmin())return;const u=S.usuarios.find(x=>x.id===d.id);if(!u||u.id===UID)return;
     if(u.ativo!==false&&u.papel==='admin'&&adminsAtivos()<=1){toast('Precisa restar ao menos um administrador ativo.','warn');return;}
-    u.ativo=u.ativo===false;persist();render();
+    u.ativo=u.ativo===false;if(u.ativo)u.pendente=false;persist();render();
     toast(`${esc(u.nome.split(' ')[0])} ${u.ativo?'reativado(a)':'desativado(a)'}.`);},
+  'adm-aprovar':(d)=>{if(!ehAdmin())return;const u=S.usuarios.find(x=>x.id===d.id);if(!u)return;
+    u.ativo=true;u.pendente=false;persist();render();
+    toast(`✓ Acesso de ${esc(u.nome.split(' ')[0])} aprovado como ${PAPEIS[u.papel]||esc(u.papel)}. Ajuste o papel em Editar, se precisar.`);},
   'adm-excluir':(d)=>{if(!ehAdmin())return;const u=S.usuarios.find(x=>x.id===d.id);if(!u||u.id===UID)return;
     if(u.papel==='admin'&&u.ativo!==false&&adminsAtivos()<=1){toast('Precisa restar ao menos um administrador ativo.','warn');return;}
     confirmar(`Excluir o acesso de ${esc(u.nome)}? Esta ação não tem volta.`,()=>{
@@ -4010,8 +4035,27 @@ function mostrarLogin(){
     <div class="field"><label class="label">Usuário</label><input class="input" id="au_user" autocomplete="username" placeholder="seu login"></div>
     <div class="field"><label class="label">Senha</label><input class="input" id="au_pass" type="password" autocomplete="current-password" placeholder="sua senha"></div>
     <button class="btn primary lg" data-act="auth-login">Entrar</button>
-    <div class="auth-link"><button data-act="auth-esqueci">Esqueci minha senha</button></div>`);
+    <div class="auth-link"><button data-act="auth-esqueci">Esqueci minha senha</button> · <button data-act="auth-criar-conta">Criar conta</button></div>`);
   setTimeout(()=>$('#au_user')?.focus(),60);
+}
+function okAuth(msg){const e=$('#auth_err');if(e)e.innerHTML=`<div class="auth-ok">${msg}</div>`;}
+function mostrarCriarConta(){
+  telaAuth(`<div class="auth-h">Criar conta</div><div class="auth-sub">Peça depois para um administrador <b>aprovar seu acesso</b> em Equipe & Acessos — só então você consegue entrar.</div>
+    <div id="auth_err"></div>
+    <div class="field"><label class="label">Seu nome</label><input class="input" id="sc_nome" autocomplete="name" placeholder="ex.: Maria Souza"></div>
+    <div class="field"><label class="label">E-mail (para recuperar a senha)</label><input class="input" id="sc_email" type="email" autocomplete="email" placeholder="voce@email.com"></div>
+    <div class="field"><label class="label">Usuário</label><input class="input" id="sc_user" autocomplete="username" autocapitalize="none" placeholder="ex.: maria"></div>
+    <div class="field"><label class="label">Senha</label><input class="input" id="sc_pass" type="password" autocomplete="new-password" placeholder="crie uma senha (mín. 4)"></div>
+    <div class="field"><label class="label">Repita a senha</label><input class="input" id="sc_pass2" type="password" autocomplete="new-password" placeholder="digite de novo"></div>
+    <button class="btn primary lg" data-act="auth-signup">Criar conta</button>
+    <div class="auth-link"><button data-act="auth-voltar-login">Voltar</button></div>`);
+  setTimeout(()=>$('#sc_nome')?.focus(),60);
+}
+function mostrarCodigoRecSignup(codigo){
+  telaAuth(`<div class="auth-h">Guarde seu código de recuperação</div>
+    <div class="auth-sub">Se um dia esquecer a senha e o e-mail falhar, só este código destrava seu acesso. Anote em lugar seguro.</div>
+    <div class="auth-code">${esc(codigo)}</div>
+    <button class="btn primary lg" data-act="auth-signup-ok">Anotei ✓</button>`);
 }
 function mostrarSetup(){
   telaAuth(`<div class="auth-h">Primeiro acesso</div><div class="auth-sub">Crie o acesso do administrador. Depois, cadastre a equipe em <b>Equipe & Acessos</b>.</div>
